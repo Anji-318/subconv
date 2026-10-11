@@ -1,0 +1,109 @@
+# ============================================================
+# Cloudflare Wrangler 配置文件模板
+# 文档: https://developers.cloudflare.com/workers/wrangler/configuration/
+# ⚠️ 本文件通常会提交到 Git，请勿在其中写入 API Token 等敏感凭据！
+# ============================================================
+
+# ---------- 基本信息 ----------
+
+# 项目名称（全局唯一，部署后的访问地址会用到它）
+# 只允许小写字母、数字和中划线
+name = "subconv"
+
+# Pages 部署目录：存放构建产物/静态文件的目录（纯静态站可写 "."）
+# ⚠️ 必须是目录，不能填 .js 文件！Pages 项目不要写 main 字段，也不要写 account_id 字段！
+# ⚠️ 安全提示：直接发布项目根目录会把 wrangler.toml / cf-accounts.toml(明文Token) / backup/ 一并公开上传！
+#    建议指向独立构建目录（如 dist），或使用部署工具 v5.2+ 的白名单暂存发布
+# pages_build_output_dir = "."
+
+# 兼容性日期：决定 Worker 运行时行为，建议设为项目创建日期
+# 格式必须为 YYYY-MM-DD
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".vercel/output/static"
+# 部署后访问：https://subconv.pages.dev（或自定义域名）
+# 本地预览：bun run preview
+
+
+# （可选）兼容性标志：启用新版运行时特性，按需开启
+# compatibility_flags = ["nodejs_compat"]
+
+# ---------- 环境变量（非敏感） ----------
+
+# 仅存放非敏感配置，敏感信息请用 Secrets（命令：npx wrangler secret put 名称）
+# 代码中通过 env.变量名 访问
+# [vars]
+# ENVIRONMENT = "production"
+# API_BASE_URL = "https://api.example.com"
+
+# ---------- KV 命名空间绑定 ----------
+
+# KV 是全局键值存储，适合存放配置、缓存等
+# 创建命令: npx wrangler kv namespace create <名称>
+# 创建后把返回的 id 填到下面（32位十六进制）
+# 代码中通过 env.<binding> 访问，如 env.MY_KV.get("key")
+# 可配置多个 [[kv_namespaces]] 块
+# [[kv_namespaces]]
+# binding = "MY_KV"                    # 绑定变量名（大写字母/数字/下划线）
+# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"          # 生产环境 namespace id
+# preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 本地开发用 id（可选）
+
+# ---------- D1 数据库绑定 ----------
+
+# D1 是 Cloudflare 的 Serverless SQL 数据库
+# 创建命令: npx wrangler d1 create <数据库名>
+# ⚠️ database_id 必须回填创建命令返回的真实 ID，占位不填部署会失败！
+# 代码中通过 env.<binding>.prepare("SQL").all() 访问
+# [[d1_databases]]
+# binding = "Senflare"             # 变量名：必须 Senflare
+# database_name = "AllinOne"       # 数据库名称随意自定义，互不影响
+# database_id = "004e641f-be43-41c4-a4d9-12ba60e2e93c" # ⚠️ 必须回填真实 ID
+
+# ---------- R2 对象存储绑定（可选） ----------
+
+# R2 是兼容 S3 API 的对象存储，适合存文件/图片
+# 创建命令: npx wrangler r2 bucket create <桶名>
+# [[r2_buckets]]
+# binding = "MY_BUCKET"
+# bucket_name = "my-bucket"
+
+# ---------- 定时任务（Cron Triggers，可选，仅 Worker） ----------
+
+# 语法同 Linux crontab，代码中监听 scheduled 事件
+# 示例: 每天早上 8 点执行一次
+# [triggers]
+# crons = ["0 8 * * *"]
+
+# ---------- 自定义域名 / 路由（可选） ----------
+
+# 把 Worker 绑定到自己的域名（需域名已托管在 Cloudflare）
+# routes = [
+#   { pattern = "example.com/api/*", zone_name = "example.com" }
+# ]
+
+# 或者使用自定义域名
+# [[routes]]
+# pattern = "api.example.com"
+# custom_domain = true
+
+# ---------- 多环境配置（可选） ----------
+
+# 顶部字段为生产环境默认值，[env.xxx] 可覆盖
+# 部署到预览环境: npx wrangler deploy --env staging
+# [env.staging]
+# name = "my-project-staging"
+# [env.staging.vars]
+# ENVIRONMENT = "staging"
+
+# ---------- 静态资源（Worker 站点，可选） ----------
+
+# 让 Worker 同时托管静态文件（旧写法 [site]，新项目推荐用 Workers Assets）
+# [site]
+# bucket = "./public"       # 静态文件目录
+# include = ["*"]
+
+# ---------- 观测/日志（可选） ----------
+
+# [observability]
+# enabled = true             # 开启 Workers Logs 日志采集
+# head_sampling_rate = 1     # 采样率 0~1
