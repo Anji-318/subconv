@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRequestContext } from '@cloudflare/next-on-pages';
-import { parseSubscription, toClash, toSingbox, toV2ray, toSurge, toQuantumultX, toLoon, toMixed, toLink, parseConfigIni, DEFAULT_CONFIG, dedupNodes, renameNodes, getUnsupported, type NodeInfo, type SubConfig } from '@/lib/sub-converter';
+import { parseSubscription, toClash, toSingbox, toV2ray, toSurge, toQuantumultX, toLoon, toMixed, toLink, parseConfigIni, DEFAULT_CONFIG, dedupNodes, renameNodes, getUnsupported, NO_NODES_HINT, type NodeInfo, type SubConfig } from '@/lib/sub-converter';
+import { SubFetchError, diagnoseFetchError } from '@/lib/fetch-diagnosis';
 
 export const runtime = 'edge';
 
@@ -53,21 +54,37 @@ async function resolveConfig(configUrl?: string, configRaw?: string): Promise<Su
   return DEFAULT_CONFIG;
 }
 
-/** 获取订阅内容：raw 直传 或 url 拉取（多链接 | 分隔） */
-async function fetchContent(url?: string, raw?: string): Promise<{ ok: true; content: string } | { ok: false; error: string; status: number }> {
-  if (raw) return { ok: true, content: raw };
+/** 获取订阅内容：raw 直传 或 url 拉取（多链接 | 分隔，部分失败不阻断其余源） */
+async function fetchContents(url?: string, raw?: string): Promise<{ ok: true; contents: string[]; failed: string[] } | { ok: false; error: string; status: number }> {
+  if (raw) return { ok: true, contents: [raw], failed: [] };
   if (!url) return { ok: false, status: 400, error: '需要 url 参数（订阅链接，多个用 | 分隔）、raw 参数（链接内容）或 id 参数（短链接）' };
   const urls = url.split('|').filter(Boolean);
-  try {
-    const results = await Promise.all(urls.map(async (u) => {
+  const settled = await Promise.allSettled(urls.map(async (u) => {
+    try {
       const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta/v2rayN' } });
-      if (!res.ok) throw new Error(`fetch ${u} failed: ${res.status}`);
+      if (!res.ok) throw new SubFetchError(u, res.status);
       return await res.text();
-    }));
-    return { ok: true, content: results.join('\n') };
-  } catch (e) {
-    return { ok: false, status: 502, error: '订阅链接获取失败: ' + (e as Error).message };
+    } catch (e) {
+      if (e instanceof SubFetchError) throw e;
+      throw new SubFetchError(u, undefined, e); // 网络层异常：保留 url 供诊断
+    }
+  }));
+  const contents: string[] = [];
+  const failed: string[] = [];
+  let firstErr: unknown;
+  for (let i = 0; i < urls.length; i++) {
+    const r = settled[i];
+    if (r.status === 'fulfilled') contents.push(r.value);
+    else {
+      if (!firstErr) firstErr = r.reason;
+      failed.push(diagnoseFetchError(r.reason));
+    }
   }
+  // 全部失败才报错；部分失败继续用成功的源（合并场景下单个机场挂了不该拖垮全部）
+  if (contents.length === 0) {
+    return { ok: false, status: 502, error: diagnoseFetchError(firstErr) };
+  }
+  return { ok: true, contents, failed };
 }
 
 /** 节点去重 + 重命名（GET 短链还原与 POST 预览共用，保证行为一致） */
@@ -123,15 +140,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'target 参数无效，支持: clash / singbox / v2ray' }, { status: 400 });
   }
 
-  // ---- 获取订阅内容 ----
-  const contentRes = await fetchContent(params.url, params.raw);
+  // ---- 获取订阅内容（每个订阅源独立解析：不同格式可混用合并）----
+  const contentRes = await fetchContents(params.url, params.raw);
   if (!contentRes.ok) {
     return NextResponse.json({ error: contentRes.error }, { status: contentRes.status });
   }
 
-  const nodes = parseSubscription(contentRes.content);
+  const nodes = contentRes.contents.flatMap((c) => parseSubscription(c));
   if (nodes.length === 0) {
-    return NextResponse.json({ error: '未解析到有效节点，请检查订阅内容' }, { status: 400 });
+    return NextResponse.json({ error: NO_NODES_HINT }, { status: 400 });
   }
 
   // ---- 节点处理（去重/重命名）+ 配置 + 输出 ----
@@ -146,6 +163,7 @@ export async function GET(request: NextRequest) {
       'Content-Disposition': `attachment; filename="subscription.${meta.ext}"`,
       'Cache-Control': 'no-store',
       'Subscription-Userinfo': `nodes=${processed.length}`,
+      ...(contentRes.failed.length ? { 'X-Subconv-Warning': `${contentRes.failed.length} 个订阅源获取失败已跳过` } : {}),
     },
   });
 }
@@ -169,13 +187,13 @@ export async function POST(request: NextRequest) {
     if (nonHttp) return NextResponse.json({ error: `检测到非订阅链接（${nonHttp.slice(0, 40)}...），请切换到「节点内容」标签粘贴节点链接` }, { status: 400 });
   }
 
-  const contentRes = await fetchContent(url, raw);
+  const contentRes = await fetchContents(url, raw);
   if (!contentRes.ok) {
     return NextResponse.json({ error: contentRes.error }, { status: contentRes.status });
   }
 
-  let nodes = parseSubscription(contentRes.content);
-  if (nodes.length === 0) return NextResponse.json({ error: '未解析到有效节点' }, { status: 400 });
+  const nodes = contentRes.contents.flatMap((c) => parseSubscription(c));
+  if (nodes.length === 0) return NextResponse.json({ error: NO_NODES_HINT }, { status: 400 });
 
   const { nodes: processed, dedupRemoved } = processNodes(nodes, { dedup, renamePrefix, renameMode });
 
@@ -192,6 +210,7 @@ export async function POST(request: NextRequest) {
     configInfo: { groups: config.groups.length, rulesets: config.rulesets.length, customRules: config.customRules.length },
     dedupRemoved,
     unsupported,
+    ...(contentRes.failed.length ? { fetchWarnings: contentRes.failed } : {}),
     result
   });
 }

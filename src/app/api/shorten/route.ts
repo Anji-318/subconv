@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRequestContext } from '@cloudflare/next-on-pages';
-import { parseSubscription } from '@/lib/sub-converter';
+import { parseSubscription, NO_NODES_HINT } from '@/lib/sub-converter';
+import { SubFetchError, diagnoseFetchError } from '@/lib/fetch-diagnosis';
 
 export const runtime = 'edge';
 
@@ -58,23 +59,32 @@ export async function POST(request: NextRequest) {
   if (!target || !TARGETS.includes(target)) return NextResponse.json({ error: 'target 无效' }, { status: 400 });
   if (raw && raw.length > 1024 * 1024) return NextResponse.json({ error: '节点内容过大（上限 1MB）' }, { status: 413 });
 
-  // 先校验订阅可解析，避免把无效内容写进 KV
-  let content = raw;
-  if (!content) {
+  // 先校验订阅可解析，避免把无效内容写进 KV（每个订阅源独立解析，不同格式可混用）
+  let contents: string[] = [];
+  if (raw) {
+    contents = [raw];
+  } else {
     const urls = url!.split('|').filter(Boolean);
-    try {
-      const results = await Promise.all(urls.map(async (u) => {
+    const settled = await Promise.allSettled(urls.map(async (u) => {
+      try {
         const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta/v2rayN' } });
-        if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
+        if (!res.ok) throw new SubFetchError(u, res.status);
         return await res.text();
-      }));
-      content = results.join('\n');
-    } catch (e) {
-      return NextResponse.json({ error: '订阅链接获取失败: ' + (e as Error).message }, { status: 502 });
+      } catch (e) {
+        if (e instanceof SubFetchError) throw e;
+        throw new SubFetchError(u, undefined, e);
+      }
+    }));
+    let firstErr: unknown;
+    for (let i = 0; i < urls.length; i++) {
+      const r = settled[i];
+      if (r.status === 'fulfilled') contents.push(r.value);
+      else if (!firstErr) firstErr = r.reason;
     }
+    if (contents.length === 0) return NextResponse.json({ error: diagnoseFetchError(firstErr) }, { status: 502 });
   }
-  const nodes = parseSubscription(content);
-  if (nodes.length === 0) return NextResponse.json({ error: '未解析到有效节点' }, { status: 400 });
+  const nodes = contents.flatMap((c) => parseSubscription(c));
+  if (nodes.length === 0) return NextResponse.json({ error: NO_NODES_HINT }, { status: 400 });
 
   const kv = getKV();
   if (!kv) {

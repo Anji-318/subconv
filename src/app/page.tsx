@@ -384,7 +384,7 @@ export default function Home() {
             size="icon"
             className="text-muted-foreground hover:text-foreground hover:bg-teal-500/10"
           >
-            <a href="#" aria-label="GitHub 仓库" target="_blank" rel="noreferrer">
+            <a href="https://github.com/Anji-318/subconv" aria-label="GitHub 仓库" target="_blank" rel="noreferrer">
               <Github className="size-5" />
             </a>
           </Button>
@@ -438,7 +438,7 @@ export default function Home() {
                     value={urlInput}
                     onChange={(e) => setUrlInput(e.target.value)}
                     placeholder={
-                      'https://example.com/sub1\nhttps://example.com/sub2'
+                      'https://example.com/sub1\nhttps://example.com/sub2\n（可填多个订阅自动合并；支持 Clash YAML / Base64 / sing-box / 节点链接等任意格式混用）'
                     }
                     className="min-h-[110px] resize-y font-mono text-xs leading-relaxed"
                     spellCheck={false}
@@ -449,7 +449,7 @@ export default function Home() {
                   <Label htmlFor="raw-input" className="mb-1.5 block text-sm">
                     节点链接
                     <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      vless / vmess / trojan / ss，每行一个
+                      vless / vmess / trojan / ss，每行一个；也可直接粘贴整份 Clash YAML、sing-box JSON 或 Base64 订阅内容
                     </span>
                   </Label>
                   <Textarea

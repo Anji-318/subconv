@@ -1,7 +1,16 @@
 /**
  * 订阅转换核心库
- * 支持：vless/vmess/trojan/ss 链接解析 → clash/singbox/v2ray 输出
+ * 支持：vless/vmess/trojan/ss 链接解析、Clash YAML 配置输入 → clash/singbox/v2ray 输出
  */
+
+import { looksLikeClashYaml, parseClashYamlProxies } from './clash-input';
+import { parseSingboxJson, parseV2rayJsonArray, extractJsonBlocks } from './json-input';
+
+/** 未解析到节点时的统一提示（列明全部支持格式与多订阅合并用法） */
+export const NO_NODES_HINT =
+  '未解析到有效节点：支持 节点分享链接（vless/vmess/trojan/ss，每行一个）、Base64 订阅、'
+  + 'Clash/mihomo YAML 配置（含 proxies: 段）、sing-box JSON 配置、v2ray JSON 订阅。'
+  + '多个订阅链接用 | 分隔可合并（不同格式可混用）。请确认订阅返回的是以上格式之一。';
 
 export type Protocol = 'vless' | 'vmess' | 'trojan' | 'ss';
 
@@ -168,23 +177,69 @@ function parseSS(url: string): NodeInfo | null {
   };
 }
 
-/** 解析订阅内容（base64 整段 或 多行链接） */
+/** 解析订阅内容：自动识别 Clash YAML / sing-box JSON / v2ray JSON / Base64 / 逐行链接，可混排 */
 export function parseSubscription(content: string): NodeInfo[] {
+  return dedupeParsed(parseAny(content, 0));
+}
+
+/** 多策略解析：各策略结果合并（重复项由 dedupeParsed 去除） */
+function parseAny(content: string, depth: number): NodeInfo[] {
   const trimmed = content.trim();
-  // 尝试 base64 整段解码
-  let lines: string[];
-  if (!trimmed.includes('://') && !trimmed.startsWith('#')) {
-    const decoded = b64Decode(trimmed.replace(/\s/g, ''));
-    lines = decoded.split(/\r?\n/);
-  } else {
-    lines = trimmed.split(/\r?\n/);
+  if (!trimmed || depth > 1) return [];
+  const out: NodeInfo[] = [];
+
+  // 1) Clash/mihomo YAML（整份，或从混排文本中提取顶层 proxies: 段）
+  if (looksLikeClashYaml(trimmed)) {
+    out.push(...parseClashYamlProxies(trimmed));
   }
-  const nodes: NodeInfo[] = [];
-  for (const line of lines) {
-    const n = parseLine(line);
-    if (n) nodes.push(n);
+
+  // 2) JSON 类（sing-box 完整配置 / v2ray JSON 订阅；整份或从混排文本中提取所有 JSON 块）
+  if (/[[{]/.test(trimmed)) {
+    for (const block of extractJsonBlocks(trimmed)) {
+      out.push(...parseSingboxJson(block));
+      out.push(...parseV2rayJsonArray(block));
+    }
   }
-  return nodes;
+
+  // 3) base64 整段订阅 → 解码后按其余格式再解析一层（base64 里套 YAML/JSON/链接都能吃）
+  if (out.length === 0 && !trimmed.includes('://')) {
+    const decoded = b64Decode(trimmed.replace(/\s/g, '')).trim();
+    if (decoded) {
+      const looksUseful = /(vless|vmess|trojan|ss):\/\//i.test(decoded)
+        || decoded.includes('proxies:')
+        || decoded.includes('"outbounds"');
+      if (looksUseful) out.push(...parseAny(decoded, depth + 1));
+    }
+  }
+
+  // 4) 逐行：URI 链接直接解析；疑似 base64 的独立行解码后再解析（混排中的 base64 订阅）
+  for (const line of trimmed.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const n = parseLine(t);
+    if (n) { out.push(n); continue; }
+    if (!t.includes('://') && t.length >= 16 && /^[A-Za-z0-9+/=_-]+$/.test(t)) {
+      const dec = b64uDecode(t).trim();
+      if (dec && /(vless|vmess|trojan|ss):\/\//i.test(dec)) {
+        out.push(...parseAny(dec, depth + 1));
+      }
+    }
+  }
+  return out;
+}
+
+/** 解析结果去重：协议|服务器|端口|凭据|名称 全同才算重复（同端口不同 uuid 的节点保留） */
+function dedupeParsed(nodes: NodeInfo[]): NodeInfo[] {
+  const seen = new Set<string>();
+  const out: NodeInfo[] = [];
+  for (const n of nodes) {
+    const cred = n.uuid || n.password || n.method || '';
+    const key = `${n.protocol}|${n.server}|${n.port}|${cred}|${n.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
 }
 
 /** 节点去重：按 server+port+protocol 去重，保留首个 */
@@ -584,6 +639,12 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
       if (n.network === 'ws') {
         base['ws-opts'] = { path: n.path || '/', headers: { Host: n.host || n.sni || n.server } };
         if (n.params?.['ed']) (base['ws-opts'] as Record<string, unknown>)['max-early-data'] = parseInt(n.params['ed']) || 2048;
+      } else if (n.network === 'xhttp') {
+        const xo: Record<string, unknown> = { path: n.path || '/', host: n.host || n.sni || n.server };
+        if (n.params?.['xmode']) xo.mode = n.params['xmode'];
+        base['xhttp-opts'] = xo;
+      } else if (n.network === 'h2') {
+        base['h2-opts'] = { path: n.path || '/', host: [n.host || n.sni || n.server] };
       } else if (n.network === 'grpc') {
         base['grpc-opts'] = { 'grpc-service-name': n.params?.serviceName || '' };
       }
@@ -600,6 +661,8 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
       if (n.fp) base['client-fingerprint'] = n.fp;
       if (n.network === 'ws') {
         base['ws-opts'] = { path: n.path || '/', headers: { Host: n.host || n.sni || n.server } };
+      } else if (n.network === 'xhttp') {
+        base['xhttp-opts'] = { path: n.path || '/', host: n.host || n.sni || n.server };
       }
     } else if (n.protocol === 'trojan') {
       base.type = 'trojan';
