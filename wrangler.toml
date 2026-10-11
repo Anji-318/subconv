@@ -36,17 +36,18 @@ pages_build_output_dir = ".vercel/output/static"
 # ENVIRONMENT = "production"
 # API_BASE_URL = "https://api.example.com"
 
-# ---------- KV 命名空间绑定 ----------
+# ---------- KV 命名空间绑定（短链接功能必配） ----------
 
-# KV 是全局键值存储，适合存放配置、缓存等
-# 创建命令: npx wrangler kv namespace create <名称>
-# 创建后把返回的 id 填到下面（32位十六进制）
-# 代码中通过 env.<binding> 访问，如 env.MY_KV.get("key")
-# 可配置多个 [[kv_namespaces]] 块
+# 短链接功能使用 KV 存储订阅参数，绑定名固定为 SUBS_KV
+# 启用步骤（详见 DEPLOY.md）：
+#   1. 运行: npx wrangler kv namespace create SUBS_KV
+#   2. 把命令返回的 id 回填到下面两行并去掉注释
+#   3. 重新部署（bun run pages:deploy 或 git push）
+# ⚠️ 未配置时代码可正常运行，仅 /api/shorten 与 /api/sub?id= 返回 501 提示
 # [[kv_namespaces]]
-# binding = "MY_KV"                    # 绑定变量名（大写字母/数字/下划线）
-# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"          # 生产环境 namespace id
-# preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 本地开发用 id（可选）
+# binding = "SUBS_KV"                     # 绑定变量名：必须 SUBS_KV（代码依赖）
+# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"          # 生产环境 namespace id（回填）
+# preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 本地预览用 id（可选）
 
 # ---------- D1 数据库绑定 ----------
 

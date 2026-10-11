@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getRequestContext } from '@cloudflare/next-on-pages';
 import { parseSubscription, toClash, toSingbox, toV2ray, toSurge, toQuantumultX, toLoon, toMixed, toLink, parseConfigIni, DEFAULT_CONFIG, dedupNodes, renameNodes, getUnsupported, type NodeInfo, type SubConfig } from '@/lib/sub-converter';
 
 export const runtime = 'edge';
@@ -17,6 +18,29 @@ const TARGET_META: Record<Target, { ct: string; ext: string; fn: (nodes: NodeInf
   mixed: { ct: 'text/plain; charset=utf-8', ext: 'txt', fn: (n) => toMixed(n) },
 };
 
+/** 一次转换请求的完整参数（短链接记录与 URL/POST 参数共用此结构） */
+interface SubParams {
+  target: Target;
+  name: string;
+  url?: string;
+  raw?: string;
+  configUrl?: string;
+  configRaw?: string;
+  dedup?: boolean;
+  renamePrefix?: string;
+  renameMode?: 'prefix-seq' | 'keep-seq' | 'prefix-only';
+}
+
+/** 读取 KV 绑定；未配置（或本地非 CF 环境）返回 null */
+function getKV(): KVNamespace | null {
+  try {
+    const { env } = getRequestContext();
+    return (env as unknown as CloudflareEnv).SUBS_KV ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** 解析配置规则：configUrl（远程） > configRaw（自定义内容） > 默认 */
 async function resolveConfig(configUrl?: string, configRaw?: string): Promise<SubConfig> {
   if (configUrl) {
@@ -29,53 +53,99 @@ async function resolveConfig(configUrl?: string, configRaw?: string): Promise<Su
   return DEFAULT_CONFIG;
 }
 
+/** 获取订阅内容：raw 直传 或 url 拉取（多链接 | 分隔） */
+async function fetchContent(url?: string, raw?: string): Promise<{ ok: true; content: string } | { ok: false; error: string; status: number }> {
+  if (raw) return { ok: true, content: raw };
+  if (!url) return { ok: false, status: 400, error: '需要 url 参数（订阅链接，多个用 | 分隔）、raw 参数（链接内容）或 id 参数（短链接）' };
+  const urls = url.split('|').filter(Boolean);
+  try {
+    const results = await Promise.all(urls.map(async (u) => {
+      const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta/v2rayN' } });
+      if (!res.ok) throw new Error(`fetch ${u} failed: ${res.status}`);
+      return await res.text();
+    }));
+    return { ok: true, content: results.join('\n') };
+  } catch (e) {
+    return { ok: false, status: 502, error: '订阅链接获取失败: ' + (e as Error).message };
+  }
+}
+
+/** 节点去重 + 重命名（GET 短链还原与 POST 预览共用，保证行为一致） */
+function processNodes(nodes: NodeInfo[], p: Pick<SubParams, 'dedup' | 'renamePrefix' | 'renameMode'>): { nodes: NodeInfo[]; dedupRemoved: number } {
+  let out = nodes;
+  let dedupRemoved = 0;
+  if (p.dedup) {
+    const r = dedupNodes(out);
+    out = r.nodes;
+    dedupRemoved = r.removed;
+  }
+  if (p.renamePrefix || p.renameMode === 'keep-seq') {
+    out = renameNodes(out, { prefix: p.renamePrefix || '', mode: p.renameMode || 'prefix-seq' });
+  }
+  return { nodes: out, dedupRemoved };
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const target = (searchParams.get('target') || 'clash') as Target;
-  const urlParam = searchParams.get('url') || '';
-  const subName = searchParams.get('name') || '订阅转换';
-  const raw = searchParams.get('raw');
-  const configUrl = searchParams.get('config') || undefined;
-  const configRaw = searchParams.get('configRaw') || undefined;
 
-  if (!TARGETS.includes(target)) {
+  // ---- 组装参数：id 短链模式从 KV 还原，否则取 URL 参数 ----
+  let params: SubParams;
+  const id = searchParams.get('id');
+  if (id) {
+    if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) {
+      return NextResponse.json({ error: '短链接 ID 格式无效' }, { status: 400 });
+    }
+    const kv = getKV();
+    if (!kv) {
+      return NextResponse.json({ error: '短链接功能未启用：服务端未绑定 KV 命名空间 SUBS_KV（见 DEPLOY.md）' }, { status: 501 });
+    }
+    const record = await kv.get(`sub:${id}`, { type: 'json' }).catch(() => null) as (SubParams & { v?: number }) | null;
+    if (!record || record.v !== 1 || !record.target || !TARGETS.includes(record.target)) {
+      return NextResponse.json({ error: '短链接不存在或已过期' }, { status: 404 });
+    }
+    params = { ...record, target: record.target, name: record.name || '订阅转换' };
+  } else {
+    const target = (searchParams.get('target') || 'clash') as Target;
+    params = {
+      target,
+      name: searchParams.get('name') || '订阅转换',
+      url: searchParams.get('url') || undefined,
+      raw: searchParams.get('raw') || undefined,
+      configUrl: searchParams.get('config') || undefined,
+      configRaw: searchParams.get('configRaw') || undefined,
+      dedup: searchParams.get('dedup') === '1',
+      renamePrefix: searchParams.get('renamePrefix') || undefined,
+      renameMode: (searchParams.get('renameMode') as SubParams['renameMode']) || undefined,
+    };
+  }
+
+  if (!TARGETS.includes(params.target)) {
     return NextResponse.json({ error: 'target 参数无效，支持: clash / singbox / v2ray' }, { status: 400 });
   }
 
-  let content = '';
-  if (raw) {
-    content = raw;
-  } else if (urlParam) {
-    const urls = urlParam.split('|').filter(Boolean);
-    try {
-      const results = await Promise.all(urls.map(async (u) => {
-        const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta/v2rayN' } });
-        if (!res.ok) throw new Error(`fetch ${u} failed: ${res.status}`);
-        return await res.text();
-      }));
-      content = results.join('\n');
-    } catch (e) {
-      return NextResponse.json({ error: '订阅链接获取失败: ' + (e as Error).message }, { status: 502 });
-    }
-  } else {
-    return NextResponse.json({ error: '需要 url 参数（订阅链接，多个用 | 分隔）或 raw 参数（链接内容）' }, { status: 400 });
+  // ---- 获取订阅内容 ----
+  const contentRes = await fetchContent(params.url, params.raw);
+  if (!contentRes.ok) {
+    return NextResponse.json({ error: contentRes.error }, { status: contentRes.status });
   }
 
-  const nodes = parseSubscription(content);
+  const nodes = parseSubscription(contentRes.content);
   if (nodes.length === 0) {
     return NextResponse.json({ error: '未解析到有效节点，请检查订阅内容' }, { status: 400 });
   }
 
-  const config = await resolveConfig(configUrl, configRaw);
-  const meta = TARGET_META[target];
-  const body = meta.fn(nodes, subName, config);
+  // ---- 节点处理（去重/重命名）+ 配置 + 输出 ----
+  const { nodes: processed } = processNodes(nodes, params);
+  const config = await resolveConfig(params.configUrl, params.configRaw);
+  const meta = TARGET_META[params.target];
+  const body = meta.fn(processed, params.name, config);
 
   return new NextResponse(body, {
     headers: {
       'Content-Type': meta.ct,
       'Content-Disposition': `attachment; filename="subscription.${meta.ext}"`,
       'Cache-Control': 'no-store',
-      'Subscription-Userinfo': `nodes=${nodes.length}`,
+      'Subscription-Userinfo': `nodes=${processed.length}`,
     },
   });
 }
@@ -92,52 +162,33 @@ export async function POST(request: NextRequest) {
   if (!url && !raw) return NextResponse.json({ error: '需要 url 或 raw' }, { status: 400 });
   if (!TARGETS.includes(target)) return NextResponse.json({ error: 'target 无效' }, { status: 400 });
 
-  let content = '';
-  if (raw) {
-    content = raw;
-  } else {
-    // 智能识别：非 http/https 协议提示用节点内容 tab
-    const urls = url!.split('|').filter(Boolean);
+  // 智能识别：非 http/https 协议提示用节点内容 tab
+  if (!raw && url) {
+    const urls = url.split('|').filter(Boolean);
     const nonHttp = urls.find(u => !/^https?:\/\//i.test(u));
     if (nonHttp) return NextResponse.json({ error: `检测到非订阅链接（${nonHttp.slice(0, 40)}...），请切换到「节点内容」标签粘贴节点链接` }, { status: 400 });
-    try {
-      const results = await Promise.all(urls.map(async (u) => {
-        const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta/v2rayN' } });
-        if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-        return await res.text();
-      }));
-      content = results.join('\n');
-    } catch (e) {
-      return NextResponse.json({ error: '订阅链接获取失败: ' + (e as Error).message }, { status: 502 });
-    }
   }
 
-  let nodes = parseSubscription(content);
+  const contentRes = await fetchContent(url, raw);
+  if (!contentRes.ok) {
+    return NextResponse.json({ error: contentRes.error }, { status: contentRes.status });
+  }
+
+  let nodes = parseSubscription(contentRes.content);
   if (nodes.length === 0) return NextResponse.json({ error: '未解析到有效节点' }, { status: 400 });
 
-  // 去重
-  let dedupRemoved = 0;
-  if (dedup) {
-    const r = dedupNodes(nodes);
-    nodes = r.nodes;
-    dedupRemoved = r.removed;
-  }
-
-  // 重命名
-  if (renamePrefix || renameMode === 'keep-seq') {
-    nodes = renameNodes(nodes, { prefix: renamePrefix || '', mode: renameMode || 'prefix-seq' });
-  }
+  const { nodes: processed, dedupRemoved } = processNodes(nodes, { dedup, renamePrefix, renameMode });
 
   // 不支持协议检测
-  const unsupported = getUnsupported(target, nodes);
+  const unsupported = getUnsupported(target, processed);
 
   const config = await resolveConfig(configUrl, configRaw);
   const meta = TARGET_META[target];
-  const result = meta.fn(nodes, name || '订阅转换', config);
+  const result = meta.fn(processed, name || '订阅转换', config);
 
   return NextResponse.json({
-    success: true, target, count: nodes.length,
-    nodes: nodes.map(n => ({ name: n.name, protocol: n.protocol, server: n.server, port: n.port, link: toLink(n) })),
+    success: true, target, count: processed.length,
+    nodes: processed.map(n => ({ name: n.name, protocol: n.protocol, server: n.server, port: n.port, link: toLink(n) })),
     configInfo: { groups: config.groups.length, rulesets: config.rulesets.length, customRules: config.customRules.length },
     dedupRemoved,
     unsupported,

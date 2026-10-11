@@ -1,5 +1,8 @@
 @import "tailwindcss";
-@import "tw-animate-css";
+/* tw-animate-css v1.4.0 内联版本（源: node_modules/tw-animate-css/dist/tw-animate.css）
+   ⚠️ Next.js 16 Turbopack 不解析仅声明 style 导出条件的包（@import "tw-animate-css" 会报 Module not found），
+   故改为本地文件引入。升级依赖时需同步更新此文件。 */
+@import "../styles/tw-animate.css";
 
 @custom-variant dark (&:is(.dark *));
 
