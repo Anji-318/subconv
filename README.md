@@ -1,6 +1,6 @@
 # SubConv 订阅转换工具 - 完整文档
 
-> 支持 8 种客户端格式互转（Clash/Clash.Meta/sing-box/Surge/QuantumultX/Loon/V2Ray/Mixed），含节点测速、去重、重命名、配置规则、分享二维码。
+> 支持 8 种客户端格式互转（Clash/Clash.Meta/sing-box/Surge/QuantumultX/Loon/V2Ray/Mixed），输入自动识别 5 种订阅格式（节点链接/Base64/Clash YAML/sing-box JSON/v2ray JSON，可混排合并），含节点测速、去重、重命名、配置规则、分享二维码。
 
 ## 目录
 
@@ -118,8 +118,8 @@ GET /api/sub?target=<格式>&url=<订阅链接>&name=<名称>&config=<远程配�
 |------|------|------|
 | `target` | ✅ | 目标格式：`clash` / `clashmeta` / `singbox` / `surge` / `quantumultx` / `loon` / `v2ray` / `mixed` |
 | `id` | ⚠️* | 短链接 ID（由 POST /api/shorten 生成）。*短链模式下无需其他参数 |
-| `url` | ⚠️* | 订阅链接（http/https），多个用 `\|` 分隔。*与 `raw`/`id` 三选一 |
-| `raw` | ⚠️* | 直接传节点链接内容（vless/vmess/trojan/ss，每行一个）。*与 `url`/`id` 三选一 |
+| `url` | ⚠️* | 订阅链接（http/https），多个用 `\|` 分隔可合并；每个源的格式任意（见下方「支持的输入格式」）。*与 `raw`/`id` 三选一 |
+| `raw` | ⚠️* | 直接传订阅文本：节点链接 / Base64 / Clash YAML / sing-box JSON / v2ray JSON 均可，自动识别。*与 `url`/`id` 三选一 |
 | `name` | ❌ | 订阅名称，默认「订阅转换」 |
 | `config` | ❌ | 远程配置规则 URL（subconverter ini 格式），仅 `clash`/`clashmeta` 生效 |
 | `configRaw` | ❌ | 自定义配置规则内容（ini 格式），仅 `clash`/`clashmeta` 生效 |
@@ -158,6 +158,21 @@ curl "https://subconv.pages.dev/api/sub?target=surge&url=https://example.com/sub
 ```
 
 **客户端导入**：直接把完整 URL 填入客户端的「订阅链接」栏即可。
+
+#### 支持的输入格式（自动识别，可混排合并）
+
+| 格式 | 识别方式 | 说明 |
+|------|----------|------|
+| 节点链接 | 每行 `vless://` / `vmess://` / `trojan://` / `ss://` | 最原始的分享链接格式 |
+| Base64 订阅 | 整段 base64，解码后为节点链接列表 | 多数机场的默认格式 |
+| Clash YAML | 含顶层 `proxies:` 段的 YAML | Clash/mihomo 配置文件可直接当订阅源 |
+| sing-box JSON | 含 `outbounds` 段的 JSON | sing-box 客户端配置/订阅 |
+| v2ray JSON | JSON 数组形式的节点订阅 | v2ray 系客户端导出 |
+
+- 多个订阅源用 `\|` 分隔（前端输入框支持换行分隔），逐源独立解析后合并；
+- 不同格式可任意混用（例如一个机场给 Base64、另一个给 Clash YAML）；
+- 单个源拉取失败不影响其他源，全部失败才报错并注明具体原因；
+- Clash YAML 输入支持 vless/vmess/trojan/ss 四种协议及 WebSocket / gRPC / H2 / XHTTP / REALITY 传输层；`type: http` 等普通代理节点自动跳过。
 
 #### 调用示例汇总
 
@@ -231,7 +246,7 @@ Content-Type: application/json
 {
   "target": "clash",              // 必填，目标格式
   "url": "https://...",           // 订阅链接（与 raw 二选一）
-  "raw": "vless://...",           // 节点内容（与 url 二选一）
+  "raw": "vless://...",           // 订阅文本，5 种格式自动识别（与 url 二选一）
   "name": "订阅转换",             // 可选，订阅名称
   "configUrl": "https://...",     // 可选，远程配置 URL（仅 clash/clashmeta）
   "configRaw": "[custom_proxy_group]...",  // 可选，自定义配置内容（仅 clash/clashmeta）
@@ -477,7 +492,15 @@ A: 检查 Cloudflare Dashboard → Pages → 项目 → Functions → 实时日�
 A: 检查：
 1. 浏览器直接访问订阅链接，看是否返回配置文本
 2. 确认 `target` 参数正确（clash/singbox 等）
-3. 原始订阅链接需为 http/https，节点链接（vless://）请用前端「节点内容」tab
+3. 输入格式不限：节点链接、Base64、Clash YAML、sing-box JSON、v2ray JSON 均自动识别，纯节点链接也可直接填订阅栏
+
+### Q: 支持哪些订阅格式？可以合并多个订阅吗？
+
+A: 支持节点链接 / Base64 / Clash YAML / sing-box JSON / v2ray JSON 五种格式，自动识别、可任意混排。多个订阅用 `\|` 分隔（前端输入框支持换行分隔）即可合并，逐源独立解析，单个源失败不影响其他源。
+
+### Q: 订阅拉取报 5xx（如 530）？浏览器却能正常打开？
+
+A: 530/1016 多为订阅站防护（WAF）拦截了 Cloudflare 数据中心的出口 IP——浏览器走你家宽带 IP 被放行，服务端代拉走数据中心 IP 被拦，两者并不矛盾。转换页的报错会注明具体原因（DNS 解析失败 / HTTP 状态码 / 防护拦截 / 内容为空等），可据此判断；此类拦截只能联系订阅商放行，或在前端「节点内容」中直接粘贴节点文本绕开。
 
 ### Q: 测速全部超时？
 
@@ -510,6 +533,10 @@ A:
 
 - ✅ 8 种客户端格式转换（Clash/Clash.Meta/sing-box/Surge/QuantumultX/Loon/V2Ray/Mixed）
 - ✅ 4 种协议解析（vless/vmess/trojan/ss）
+- ✅ 5 种输入格式自动识别混排（节点链接/Base64/Clash YAML/sing-box JSON/v2ray JSON）
+- ✅ 多订阅合并（逐源独立解析，格式任意混用，单源失败不影响整体）
+- ✅ 订阅拉取失败原因诊断（区分 DNS / HTTP 状态 / 防护拦截 / 内容为空）
+- ✅ XHTTP / H2 传输节点转换无损（xhttp-opts / h2-opts 输出往返保留）
 - ✅ 配置规则三模式（默认 100+ 条 / 自定义 ini / 远程 URL）
 - ✅ 远程规则集预设库（ACL4SSR 等 5 个一键填入）
 - ✅ 配置导入导出（.ini 文件）
