@@ -44,11 +44,17 @@ pages_build_output_dir = ".vercel/output/static"
 #   2. 把命令返回的 id 回填到下面两行并去掉注释
 #   3. 重新部署（bun run pages:deploy 或 git push）
 # ⚠️ 未配置时代码可正常运行，仅 /api/shorten 与 /api/sub?id= 返回 501 提示
+<<<<<<< HEAD
 # 绑定变量名：必须 SUBS_KV（代码依赖）
 # 生产环境 namespace id（回填）
 [[kv_namespaces]]
 binding = "SUBS_KV"                     
 id = "fa386465d7d24d97b313924ab4e11390"          
+=======
+[[kv_namespaces]]
+binding = "SUBS_KV"                     # 绑定变量名：必须 SUBS_KV（代码依赖）
+id = "004e641f-be43-41c4-a4d9-12ba60e2e93c"          # 生产环境 namespace id（回填）
+>>>>>>> a44d20e (fix: 策略组循环引用等9项问题 + 新增KV短链接功能)
 # preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 本地预览用 id（可选）
 
 # ---------- D1 数据库绑定 ----------
