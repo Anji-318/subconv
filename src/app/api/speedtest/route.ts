@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseSubscription, type NodeInfo } from '@/lib/sub-converter';
+import { parseSubscription, NO_NODES_HINT, type NodeInfo } from '@/lib/sub-converter';
+import { SubFetchError, diagnoseFetchError } from '@/lib/fetch-diagnosis';
 
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
@@ -55,25 +56,30 @@ export async function POST(request: NextRequest) {
 
   if (!raw && !url) return NextResponse.json({ error: '需要 url 或 raw' }, { status: 400 });
 
-  let content = '';
+  let contents: string[] = [];
   if (raw) {
-    content = raw;
+    contents = [raw];
   } else {
     const urls = url!.split('|').filter(Boolean);
-    try {
-      const results = await Promise.all(urls.map(async (u) => {
-        const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta' } });
-        if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-        return await res.text();
-      }));
-      content = results.join('\n');
-    } catch (e) {
-      return NextResponse.json({ error: '订阅链接获取失败: ' + (e as Error).message }, { status: 502 });
+    const settled = await Promise.allSettled(urls.map(async (u) => {
+      const res = await fetch(u, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'clash.meta' } });
+      if (!res.ok) throw new SubFetchError(u, res.status);
+      return await res.text();
+    }));
+    let firstErr: unknown;
+    for (let i = 0; i < urls.length; i++) {
+      const r = settled[i];
+      if (r.status === 'fulfilled') contents.push(r.value);
+      else if (!firstErr) firstErr = r.reason;
+    }
+    // 全部失败才报错；部分失败继续用成功的源
+    if (contents.length === 0) {
+      return NextResponse.json({ error: '订阅链接获取失败: ' + diagnoseFetchError(firstErr) }, { status: 502 });
     }
   }
 
-  const nodes = parseSubscription(content);
-  if (nodes.length === 0) return NextResponse.json({ error: '未解析到有效节点' }, { status: 400 });
+  const nodes = contents.flatMap((c) => parseSubscription(c));
+  if (nodes.length === 0) return NextResponse.json({ error: NO_NODES_HINT }, { status: 400 });
 
   // 并发测速：限制并发数
   const conc = Math.max(1, Math.min(20, concurrency));
