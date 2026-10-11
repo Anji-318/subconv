@@ -5,10 +5,12 @@
 ## 目录
 
 - [快速部署](#快速部署)
+- [短链接功能（KV 存储）配置](#短链接功能kv-存储配置)
 - [API 文档](#api-文档)
   - [1. 订阅转换 GET /api/sub](#1-订阅转换-get--apisub)
   - [2. 订阅转换 POST /api/sub](#2-订阅转换-post--apisub)
   - [3. 节点测速 POST /api/speedtest](#3-节点测速-post--apispeedtest)
+  - [4. 短链接生成 POST /api/shorten](#4-短链接生成-post--apishorten)
 - [使用示例](#使用示例)
 - [自定义域名](#自定义域名)
 - [常见问题](#常见问题)
@@ -65,6 +67,39 @@ bun run pages:preview    # 访问 http://localhost:8788
 
 ---
 
+## 短链接功能（KV 存储）配置
+
+**为什么需要短链接**：SubConv 是无状态服务（不存任何数据），直接粘贴节点生成订阅时，节点内容只能全部编码进 URL（`raw=` 参数），链接又长又难扫二维码。短链接模式把节点参数存入 Cloudflare KV，换取形如 `https://你的域名/api/sub?id=Ab3dEf9H` 的短链接。
+
+**启用步骤**（约 2 分钟）：
+
+```bash
+# 1. 创建 KV 命名空间（需先 npx wrangler login）
+npx wrangler kv namespace create SUBS_KV
+# 输出示例:
+# 🌀 Creating namespace with title "subconv-SUBS_KV"
+# ✨ Success! Add the following to your configuration file in your kv_namespaces block:
+# [[kv_namespaces]]
+# binding = "SUBS_KV"
+# id = "e29b26xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# 2. 把上面的 id 回填到 wrangler.toml 的 [[kv_namespaces]] 段并去掉注释
+
+# 3. 重新部署
+bun run pages:deploy
+```
+
+GitHub 自动部署的用户：回填 wrangler.toml 后 push 即可生效。
+
+**行为说明**：
+
+- 未配置 KV 时，站点其他功能完全正常，仅短链接相关接口返回 501 提示；前端开启「短链接」开关后会自动回退完整链接并 toast 提醒。
+- 短链接默认 **90 天**有效（KV TTL 到期自动删除，可在请求 `ttlDays` 参数 1~365 天调整）。
+- 短链接 ID 为 8 位无歧义 base62（约 46 bit 随机熵），无法枚举；但链接本身包含节点凭据，请勿公开分享。
+- KV 免费额度：每天 1000 次写入 / 10 万次读取，个人使用绰绰有余；写入发生在「生成短链」时，读取发生在客户端每次刷新订阅时。
+
+---
+
 ## API 文档
 
 ### 1. 订阅转换 GET /api/sub
@@ -82,11 +117,17 @@ GET /api/sub?target=<格式>&url=<订阅链接>&name=<名称>&config=<远程配�
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `target` | ✅ | 目标格式：`clash` / `clashmeta` / `singbox` / `surge` / `quantumultx` / `loon` / `v2ray` / `mixed` |
-| `url` | ⚠️* | 订阅链接（http/https），多个用 `\|` 分隔。*与 `raw` 二选一 |
-| `raw` | ⚠️* | 直接传节点链接内容（vless/vmess/trojan/ss，每行一个）。*与 `url` 二选一 |
+| `id` | ⚠️* | 短链接 ID（由 POST /api/shorten 生成）。*短链模式下无需其他参数 |
+| `url` | ⚠️* | 订阅链接（http/https），多个用 `\|` 分隔。*与 `raw`/`id` 三选一 |
+| `raw` | ⚠️* | 直接传节点链接内容（vless/vmess/trojan/ss，每行一个）。*与 `url`/`id` 三选一 |
 | `name` | ❌ | 订阅名称，默认「订阅转换」 |
 | `config` | ❌ | 远程配置规则 URL（subconverter ini 格式），仅 `clash`/`clashmeta` 生效 |
 | `configRaw` | ❌ | 自定义配置规则内容（ini 格式），仅 `clash`/`clashmeta` 生效 |
+| `dedup` | ❌ | 传 `1` 开启节点去重（按 server:port） |
+| `renameMode` | ❌ | 节点重命名模式（配合 `renamePrefix`） |
+| `renamePrefix` | ❌ | 重命名前缀 |
+
+> 短链接 `id` 模式下，生成时保存的全部参数（含 target/name/config/去重/重命名）自动还原应用，无需重复传递。
 
 **响应**：对应格式的配置文件
 
@@ -284,6 +325,59 @@ Content-Type: application/json
 curl -X POST https://subconv.pages.dev/api/speedtest \
   -H "Content-Type: application/json" \
   -d '{"raw":"vless://uuid@1.1.1.1:443#CF\nss://...@8.8.8.8:443#Google","timeout":3000}'
+```
+
+---
+
+### 4. 短链接生成 POST /api/shorten
+
+把转换参数存入 KV，返回短链接 `https://域名/api/sub?id=xxxxxxxx`。需要先配置 KV 绑定 `SUBS_KV`（见上文配置章节），未配置返回 501。
+
+**请求**
+
+```http
+POST /api/shorten
+Content-Type: application/json
+```
+
+**Body**
+
+```jsonc
+{
+  "raw": "vless://...",     // 节点内容（与 url 二选一，同 /api/sub）
+  "url": "https://...",     // 订阅链接（与 raw 二选一）
+  "target": "clash",        // 必填，同 /api/sub
+  "name": "订阅转换",        // 可选
+  "configUrl": "...",       // 可选，远程配置规则
+  "configRaw": "...",       // 可选，自定义配置规则
+  "dedup": true,            // 可选，去重
+  "renamePrefix": "HK",     // 可选，重命名前缀
+  "renameMode": "prefix-seq", // 可选
+  "ttlDays": 90             // 可选，有效期 1~365 天，默认 90
+}
+```
+
+**响应**
+
+```jsonc
+{
+  "success": true,
+  "id": "Ab3dEf9H",
+  "shortUrl": "https://subconv.pages.dev/api/sub?id=Ab3dEf9H",
+  "ttlDays": 90,
+  "nodes": 4
+}
+```
+
+**说明**：存储前会先解析校验节点，无效内容不会写入 KV；`raw` 上限 1MB；ID 撞键自动重试。
+
+**示例**
+
+```bash
+curl -X POST https://subconv.pages.dev/api/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"target":"clash","raw":"vless://uuid@1.2.3.4:443?type=ws#香港-1","ttlDays":180}'
+# 之后客户端导入 https://subconv.pages.dev/api/sub?id=Ab3dEf9H
 ```
 
 ---

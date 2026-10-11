@@ -119,12 +119,15 @@ export default function Home() {
   const [configUrl, setConfigUrl] = useState('')
   const [configRaw, setConfigRaw] = useState('')
   const [dedup, setDedup] = useState(false)
+  const [useShort, setUseShort] = useState(false)
   const [renamePrefix, setRenamePrefix] = useState('')
   const [renameMode, setRenameMode] = useState<'none' | 'prefix-seq' | 'keep-seq' | 'prefix-only'>('none')
 
   const [loading, setLoading] = useState(false)
   const [subLink, setSubLink] = useState<string | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  const [qrFailed, setQrFailed] = useState(false)
+  const [shortInfo, setShortInfo] = useState<{ id: string; ttlDays: number } | null>(null)
   const [preview, setPreview] = useState<PreviewResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [speedTesting, setSpeedTesting] = useState(false)
@@ -184,19 +187,12 @@ export default function Home() {
     setError(null)
     setSubLink(null)
     setQrDataUrl(null)
+    setQrFailed(false)
+    setShortInfo(null)
     setPreview(null)
 
     try {
-      // 1. 生成二维码（基于订阅链接）
-      const qr = await QRCode.toDataURL(link, {
-        width: 200,
-        margin: 1,
-        errorCorrectionLevel: 'M',
-      })
-      setQrDataUrl(qr)
-      setSubLink(link)
-
-      // 2. 调用 POST 预览，获取节点统计
+      // 1. 先调用 POST 预览：校验节点并获取统计
       const params = buildParams()!
       const configBody: { configUrl?: string; configRaw?: string } = {}
       if (configMode === 'remote' && configUrl.trim()) configBody.configUrl = configUrl.trim()
@@ -223,9 +219,55 @@ export default function Home() {
         dedupRemoved: data.dedupRemoved as number | undefined,
         unsupported: data.unsupported as { protocol: string; count: number }[] | undefined,
       })
+
+      // 2. 短链接模式：把参数存入服务端 KV，换取短链（失败自动回退完整链接）
+      let finalLink = link
+      let shortCreated = false
+      if (useShort) {
+        try {
+          const sres = await fetch('/api/shorten', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              target,
+              name: name.trim() || '订阅转换',
+              ...params,
+              ...configBody,
+              dedup,
+              ...(renameMode !== 'none' ? { renamePrefix: renamePrefix.trim(), renameMode } : {}),
+              ttlDays: 90,
+            }),
+          })
+          const sdata = await sres.json().catch(() => ({}))
+          if (!sres.ok || !sdata?.success) {
+            throw new Error(sdata?.error || `短链接生成失败 (${sres.status})`)
+          }
+          finalLink = sdata.shortUrl as string
+          setShortInfo({ id: sdata.id as string, ttlDays: sdata.ttlDays as number })
+          shortCreated = true
+        } catch (e) {
+          toast.error(`短链接生成失败，已使用完整链接：${(e as Error).message.slice(0, 60)}`)
+        }
+      }
+      setSubLink(finalLink)
+
+      // 3. 二维码（基于最终链接；失败不阻断流程）
+      try {
+        const qr = await QRCode.toDataURL(finalLink, {
+          width: 200,
+          margin: 1,
+          errorCorrectionLevel: 'M',
+        })
+        setQrDataUrl(qr)
+      } catch {
+        setQrFailed(true)
+      }
+
+      // 4. 统计提示
       const parts = [`已解析 ${data.count} 个节点`]
       if (data.dedupRemoved) parts.push(`去重 ${data.dedupRemoved} 个`)
       if (data.unsupported?.length) parts.push(`${data.unsupported.reduce((s: number, u: { count: number }) => s + u.count, 0)} 个不支持`)
+      if (shortCreated) parts.push('短链接已创建')
       toast.success(parts.join(' · '))
     } catch (e) {
       const msg = (e as Error).message || '生成失败'
@@ -470,6 +512,10 @@ export default function Home() {
                     <Switch checked={dedup} onCheckedChange={setDedup} />
                     <span>去重（按 server:port）</span>
                   </label>
+                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                    <Switch checked={useShort} onCheckedChange={setUseShort} />
+                    <span>短链接（KV 存储）</span>
+                  </label>
                   <div className="flex items-center gap-1.5 text-xs">
                     <span className="text-muted-foreground">重命名:</span>
                     <Select value={renameMode} onValueChange={(v) => setRenameMode(v as typeof renameMode)}>
@@ -491,6 +537,11 @@ export default function Home() {
                     />
                   )}
                 </div>
+                {useShort && (
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    开启后节点参数存入服务端 KV（默认 90 天有效），订阅链接大幅变短、二维码更易扫。首次使用需在 Cloudflare 绑定 KV 命名空间 SUBS_KV（见 DEPLOY.md），未配置时自动回退完整链接。
+                  </p>
+                )}
               </div>
 
               {/* 配置规则区 */}
@@ -642,7 +693,7 @@ export default function Home() {
                 {/* 订阅链接行 */}
                 <div className="space-y-2">
                   <Label className="text-xs uppercase tracking-wide text-muted-foreground">
-                    订阅链接
+                    {shortInfo ? `订阅链接（短链 ${shortInfo.id} · ${shortInfo.ttlDays} 天有效）` : '订阅链接'}
                   </Label>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <Input
@@ -687,6 +738,12 @@ export default function Home() {
                           alt="订阅二维码"
                           className="size-full rounded-md"
                         />
+                      ) : qrFailed ? (
+                        <span className="px-2 text-center text-[11px] leading-relaxed text-muted-foreground">
+                          链接过长，二维码生成失败
+                          <br />
+                          请开启短链接后重试
+                        </span>
                       ) : (
                         <Loader2 className="size-6 animate-spin text-zinc-400" />
                       )}
@@ -876,7 +933,7 @@ export default function Home() {
           <div className="flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground sm:flex-row sm:gap-4">
             <div className="flex items-center gap-1.5">
               <ShieldCheck className="size-3.5 text-teal-400" />
-              <span>本地即时转换，不存储任何订阅内容</span>
+              <span>即时转换不落日志 · 仅短链接模式按需存入服务端 KV</span>
             </div>
             <span className="hidden sm:inline">·</span>
             <span>

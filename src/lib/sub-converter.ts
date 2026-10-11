@@ -234,21 +234,22 @@ export function getUnsupported(target: string, nodes: NodeInfo[]): { protocol: s
 
 export interface SubConfig {
   groups: { name: string; type: string; opts: string[] }[];   // proxy-groups 定义
-  rulesets: { tag: string; url: string }[];                    // 远程规则集
+  rulesets: { tag: string; url: string; target?: string }[];   // 远程规则集（target = 规则生效的目标策略组）
   customRules: string[];                                        // 自定义规则行
 }
 
 /** 默认配置（内置模板） */
 export const DEFAULT_CONFIG: SubConfig = {
   groups: [
-    { name: '🚀 节点选择', type: 'select', opts: ['♻️ 自动选择', '.*', '🎯 全球直连'] },
+    { name: '🚀 节点选择', type: 'select', opts: ['♻️ 自动选择', '.*', 'DIRECT'] },
     { name: '♻️ 自动选择', type: 'url-test', opts: ['.*', 'http://www.gstatic.com/generate_204', '300,50'] },
     { name: '🌍 国外媒体', type: 'select', opts: ['🚀 节点选择', '.*'] },
     { name: '🍎 苹果服务', type: 'select', opts: ['🎯 全球直连', '🚀 节点选择'] },
     { name: '🤖 AI 服务', type: 'select', opts: ['🚀 节点选择', '.*'] },
     { name: 'Ⓜ️ 微软服务', type: 'select', opts: ['🎯 全球直连', '🚀 节点选择'] },
     { name: '📲 电报信息', type: 'select', opts: ['🚀 节点选择', '.*'] },
-    { name: '🎯 全球直连', type: 'select', opts: ['DIRECT', '🚀 节点选择'] },
+    // ⚠️ 全球直连只允许 DIRECT，不得回引节点选择，否则 mihomo 报 "loop is detected in ProxyGroup"
+    { name: '🎯 全球直连', type: 'select', opts: ['DIRECT'] },
     { name: '🛑 广告拦截', type: 'select', opts: ['REJECT', 'DIRECT'] },
     { name: '🐟 漏网之鱼', type: 'select', opts: ['🚀 节点选择', '🎯 全球直连'] },
   ],
@@ -346,7 +347,9 @@ export const DEFAULT_CONFIG: SubConfig = {
     'DOMAIN-SUFFIX,tiktokcdn.com,🌍 国外媒体',
     'DOMAIN-SUFFIX,pixiv.net,🌍 国外媒体',
     'DOMAIN-SUFFIX,pximg.net,🌍 国外媒体',
-    'DOMAIN-SUFFIX,bilibili.com,🌍 国外媒体',
+    // bilibili 为国内服务，必须直连
+    'DOMAIN-SUFFIX,bilibili.com,🎯 全球直连',
+    'DOMAIN-SUFFIX,bilivideo.com,🎯 全球直连',
     'DOMAIN-SUFFIX,hbomaxcdn.com,🌍 国外媒体',
     // 苹果服务
     'DOMAIN-SUFFIX,apple.com,🍎 苹果服务',
@@ -389,7 +392,11 @@ export const DEFAULT_CONFIG: SubConfig = {
   ],
 };
 
-/** 解析 subconverter ini 配置为 SubConfig */
+/** 解析 subconverter ini 配置为 SubConfig
+ *  兼容两种格式：
+ *  1) 标准 subconverter 格式：[custom] 段 + custom_proxy_group= / ruleset= / custom_rule= 前缀行（ACL4SSR 等预设均为此格式）
+ *  2) 简化段格式：[custom_proxy_group] / [ruleset] / [custom_rule] 独立段
+ */
 export function parseConfigIni(ini: string): SubConfig {
   const cfg: SubConfig = { groups: [], rulesets: [], customRules: [] };
   const lines = ini.split(/\r?\n/);
@@ -398,6 +405,27 @@ export function parseConfigIni(ini: string): SubConfig {
     let line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith(';')) continue;
     if (line.startsWith('[') && line.endsWith(']')) { section = line.slice(1, -1).toLowerCase(); continue; }
+
+    // 标准 subconverter 格式：前缀行（在 [custom] 段内或任意位置均可识别）
+    const gp = line.match(/^custom_proxy_group\s*=(.+)$/i);
+    if (gp) {
+      // 格式：name`type`opt1`opt2`...
+      const parts = gp[1].trim().split('`').map((s) => s.trim());
+      if (parts.length >= 2 && parts[0] && parts[1]) cfg.groups.push({ name: parts[0], type: parts[1], opts: parts.slice(2) });
+      continue;
+    }
+    const rp = line.match(/^ruleset\s*=(.+)$/i);
+    if (rp) {
+      // 格式：tag,url[,target]
+      const parts = rp[1].trim().split(',').map((s) => s.trim());
+      if (parts.length >= 2 && parts[0] && parts[1]) cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
+      continue;
+    }
+    const cr = line.match(/^custom_rule\s*=(.+)$/i);
+    if (cr) { cfg.customRules.push(cr[1].trim()); continue; }
+    // [custom] 段内其他键（include_remarks= 等）直接忽略
+
+    // 简化段格式
     if (section === 'custom_proxy_group') {
       // 格式：name`type`opt1`opt2`...
       const parts = line.split('`');
@@ -405,7 +433,7 @@ export function parseConfigIni(ini: string): SubConfig {
     } else if (section === 'ruleset') {
       // 格式：tag,url  或  tag,url,target（subconverter 用 , 分隔）
       const parts = line.split(',').map((s) => s.trim());
-      if (parts.length >= 2) cfg.rulesets.push({ tag: parts[0], url: parts[1] });
+      if (parts.length >= 2) cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
     } else if (section === 'custom_rule') {
       cfg.customRules.push(line);
     }
@@ -413,10 +441,10 @@ export function parseConfigIni(ini: string): SubConfig {
   return cfg;
 }
 
-/** 展开配置的 proxy-groups：把 opts 中的正则 `.*` 等替换为实际节点名 */
+/** 展开配置的 proxy-groups：把 opts 中的正则 `.*` 等替换为实际节点名，并自动剥离策略组循环引用 */
 function expandGroups(cfg: SubConfig, nodeNames: string[]): Record<string, unknown>[] {
   const groupNames = new Set(cfg.groups.map((g) => g.name));
-  return cfg.groups.map((g) => {
+  const groups: { name: string; type: string; proxies: string[]; url?: string; interval?: number; tolerance?: number; _opts: string[] }[] = cfg.groups.map((g) => {
     const proxies: string[] = [];
     for (const opt of g.opts) {
       if (opt === 'DIRECT') { proxies.push('DIRECT'); continue; }
@@ -439,27 +467,82 @@ function expandGroups(cfg: SubConfig, nodeNames: string[]): Record<string, unkno
       if (opt === '.*') { proxies.push(...nodeNames); continue; }
       // 普通字符串：若匹配现有组名则引用，否则尝试当正则匹配节点
       if (groupNames.has(opt)) { proxies.push(opt); continue; }
-      try { const re = new RegExp(opt); const matched = nodeNames.filter((n) => re.test(n)); if (matched.length) proxies.push(...matched); else proxies.push(opt); } catch { proxies.push(opt); }
+      try {
+        const re = new RegExp(opt);
+        const matched = nodeNames.filter((n) => re.test(n));
+        if (matched.length) proxies.push(...matched);
+        // 都不匹配时直接丢弃，避免输出指向不存在代理的引用（mihomo 会报 proxy not found）
+      } catch { /* 非法正则，丢弃 */ }
     }
-    const group: Record<string, unknown> = { name: g.name, type: g.type, proxies: proxies.length ? [...new Set(proxies)] : nodeNames };
-    if (g.type === 'url-test' || g.type === 'fallback') {
-      const url = g.opts.find((o) => o.startsWith('http')) || 'http://www.gstatic.com/generate_204';
-      const it = g.opts.find((o) => /^\d+,\d+$/.test(o));
-      group.url = url;
-      group.interval = it ? parseInt(it.split(',')[0]) : 300;
-      group.tolerance = it ? parseInt(it.split(',')[1]) : 50;
-    }
-    return group;
+    return { name: g.name, type: g.type, proxies: [...new Set(proxies)], _opts: g.opts };
   });
+
+  // url-test/fallback 组从 opts 提取测试参数
+  for (const g of groups) {
+    if (g.type === 'url-test' || g.type === 'fallback') {
+      const opts = (g._opts as string[]) || [];
+      const url = opts.find((o) => o.startsWith('http')) || 'http://www.gstatic.com/generate_204';
+      const it = opts.find((o) => /^\d+,\d+$/.test(o));
+      g.url = url;
+      g.interval = it ? parseInt(it.split(',')[0]) : 300;
+      g.tolerance = it ? parseInt(it.split(',')[1]) : 50;
+    }
+  }
+
+  // 剥离组间循环引用（mihomo 检测到环会拒绝启动）
+  breakGroupCycles(groups, nodeNames);
+
+  // 空组兜底：填充全部节点
+  for (const g of groups) {
+    if (!(g.proxies as string[]).length) g.proxies = [...nodeNames];
+  }
+
+  return groups.map(({ _opts, ...rest }) => rest);
+}
+
+/** 检测并打断策略组循环引用：DFS 找回边并删除，迭代直到无环 */
+function breakGroupCycles(groups: { name: string; type: string; proxies: string[] }[], nodeNames: string[]): void {
+  const byName = new Map(groups.map((g) => [g.name, g]));
+  const state = new Map<string, number>(); // 0=未访问 1=在栈中 2=已完成
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ < 50) {
+    changed = false;
+    state.clear();
+    const dfs = (name: string): void => {
+      state.set(name, 1);
+      const g = byName.get(name);
+      if (g) {
+        const refs = g.proxies.filter((p) => byName.has(p)); // 快照，允许遍历中删除
+        for (const ref of refs) {
+          const st = state.get(ref) ?? 0;
+          if (st === 0) {
+            dfs(ref);
+          } else if (st === 1) {
+            // 回边：删除当前组对该组的引用，打破环
+            const idx = g.proxies.indexOf(ref);
+            if (idx >= 0) { g.proxies.splice(idx, 1); changed = true; }
+          }
+        }
+      }
+      state.set(name, 2);
+    };
+    for (const g of groups) {
+      if ((state.get(g.name) ?? 0) === 0) dfs(g.name);
+    }
+  }
 }
 
 /** 构建规则列表：自定义规则 + 远程规则集引用 */
 function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<string, unknown>[] } {
   const rules: string[] = [];
   const ruleProviders: Record<string, unknown>[] = [];
+  const groupNames = new Set(cfg.groups.map((g) => g.name));
   // 远程规则集转为 rule-providers + RULE-SET 规则
-  for (const rs of cfg.rulesets) {
-    const tag = rs.tag.replace(/[^a-zA-Z0-9_-]/g, '_');
+  cfg.rulesets.forEach((rs, i) => {
+    // tag 必须唯一且仅含安全字符：加索引前缀防止中文组名 sanitize 后互相冲突
+    const sanitized = rs.tag.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'ruleset';
+    const tag = `rs${i}_${sanitized}`;
     const isYaml = rs.url.endsWith('.yaml') || rs.url.endsWith('.yml');
     ruleProviders.push({
       tag,
@@ -470,8 +553,10 @@ function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<st
       interval: 86400,
       path: `./ruleset/${tag}.${isYaml ? 'yaml' : 'txt'}`,
     });
-    rules.push(`RULE-SET,${tag},${rs.tag.includes(',') ? rs.tag.split(',')[2] || '🚀 节点选择' : '🚀 节点选择'}`);
-  }
+    // 目标组优先级：ini 显式 target > 与组名一致的 tag > 默认 🚀 节点选择
+    const target = rs.target || (groupNames.has(rs.tag) ? rs.tag : '🚀 节点选择');
+    rules.push(`RULE-SET,${tag},${target}`);
+  });
   // 自定义规则
   rules.push(...cfg.customRules);
   return { rules, ruleProviders };
@@ -481,7 +566,8 @@ function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<st
 export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: SubConfig = DEFAULT_CONFIG): string {
   const nodeNames = nodes.map((n) => n.name);
   const proxies = nodes.map((n) => {
-    const name = yamlStr(n.name);
+    // 注意：这里传原始名，yamlStr 转义统一在 yamlListItem/yamlObj 输出层做一次，避免双重转义
+    const name = n.name;
     const base: Record<string, unknown> = { name };
     if (n.protocol === 'vless') {
       base.type = 'vless';
@@ -492,6 +578,7 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
       if (n.network && n.network !== 'tcp') base.network = n.network;
       if (n.sni) base.servername = n.sni;
       if (n.flow) base.flow = n.flow;
+      if (n.fp) base['client-fingerprint'] = n.fp;
       if (n.alpn) base.alpn = n.alpn.split(',');
       if (n.pbk) { base['reality-opts'] = { 'public-key': n.pbk, 'short-id': n.sid || '' }; }
       if (n.network === 'ws') {
@@ -510,6 +597,7 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
       base.tls = n.tls;
       if (n.network && n.network !== 'tcp') base.network = n.network;
       if (n.sni) base.servername = n.sni;
+      if (n.fp) base['client-fingerprint'] = n.fp;
       if (n.network === 'ws') {
         base['ws-opts'] = { path: n.path || '/', headers: { Host: n.host || n.sni || n.server } };
       }
@@ -519,6 +607,7 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
       base.port = n.port;
       base.password = n.password;
       base.sni = n.sni || n.server;
+      if (n.fp) base['client-fingerprint'] = n.fp;
       if (n.network && n.network !== 'tcp') {
         base.network = n.network;
         if (n.network === 'ws') {
@@ -592,9 +681,13 @@ export function toSingbox(nodes: NodeInfo[], subName = '订阅转换'): string {
     const ob: Record<string, unknown> = { tag: n.name, type: n.protocol, server: n.server, server_port: n.port };
     if (n.protocol === 'vless') {
       ob.uuid = n.uuid;
-      ob.tls = { enabled: n.tls, server_name: n.sni || n.server, insecure: false };
-      if (n.alpn) ob.tls.alpn = n.alpn.split(',');
-      if (n.pbk) { ob.tls.reality = { enabled: true, public_key: n.pbk, short_id: n.sid || '' }; }
+      if (n.tls) {
+        const tls: Record<string, unknown> = { enabled: true, server_name: n.sni || n.server, insecure: false };
+        if (n.alpn) tls.alpn = n.alpn.split(',');
+        if (n.fp) tls.utls = { enabled: true, fingerprint: n.fp };
+        if (n.pbk) { tls.reality = { enabled: true, public_key: n.pbk, short_id: n.sid || '' }; }
+        ob.tls = tls;
+      }
       if (n.network === 'ws') {
         ob.transport = { type: 'ws', path: n.path || '/', headers: { Host: n.host || n.sni || n.server } };
       } else if (n.network === 'grpc') {
@@ -605,7 +698,11 @@ export function toSingbox(nodes: NodeInfo[], subName = '订阅转换'): string {
       ob.uuid = n.uuid;
       ob.alter_id = n.alterId || 0;
       ob.security = 'auto';
-      ob.tls = { enabled: n.tls, server_name: n.sni || n.server, insecure: false };
+      if (n.tls) {
+        const tls: Record<string, unknown> = { enabled: true, server_name: n.sni || n.server, insecure: false };
+        if (n.fp) tls.utls = { enabled: true, fingerprint: n.fp };
+        ob.tls = tls;
+      }
       if (n.network === 'ws') {
         ob.transport = { type: 'ws', path: n.path || '/', headers: { Host: n.host || n.sni || n.server } };
       }
@@ -685,6 +782,16 @@ export function toLink(n: NodeInfo): string {
     if (n.flow) p.set('flow', n.flow);
     return `vless://${n.uuid}@${n.server}:${n.port}?${p.toString()}#${encodeURIComponent(n.name)}`;
   }
+  if (n.protocol === 'vmess') {
+    // v2rayN 标准：base64(JSON)，port/aid 均为字符串
+    const json = {
+      v: '2', ps: n.name, add: n.server, port: String(n.port), id: n.uuid || '',
+      aid: String(n.alterId || 0), scy: 'auto', net: n.network || 'tcp', type: 'none',
+      host: n.host || '', path: n.path || '', tls: n.tls ? 'tls' : '',
+      sni: n.sni || '', alpn: n.alpn || '', fp: n.fp || '',
+    };
+    return `vmess://${Buffer.from(JSON.stringify(json), 'utf8').toString('base64')}`;
+  }
   if (n.protocol === 'trojan') {
     const p = new URLSearchParams();
     if (n.network && n.network !== 'tcp') p.set('type', n.network);
@@ -699,9 +806,12 @@ export function toLink(n: NodeInfo): string {
   return '';
 }
 
-/** YAML 字符串转义 */
+/** YAML 字符串转义（含纯数字/布尔字面量/特殊首字符保护，避免被 YAML 解析为非字符串类型） */
 function yamlStr(s: string): string {
-  if (/[:#{}\[\],&*?|<>=!%@`"\n]/.test(s)) return JSON.stringify(s);
+  if (s === '') return '""';
+  if (/^[\s]|[\s]$|^[-?:,[\]{}]/.test(s)) return JSON.stringify(s);
+  if (/^(\d+(\.\d+)?|true|false|null|yes|no|on|off|~)$/i.test(s)) return JSON.stringify(s);
+  if (/[:#\[\],&*?|<>=!%@`"'\n]/.test(s)) return JSON.stringify(s);
   return s;
 }
 
@@ -797,7 +907,9 @@ ${proxies.join('\n')}
 [Proxy Group]
 🚀 节点选择 = select, ♻️ 自动选择, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(', ')}, 🎯 全球直连
 ♻️ 自动选择 = url-test, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(', ')}, url=http://www.gstatic.com/generate_204, interval=300
-🎯 全球直连 = select, DIRECT, 🚀 节点选择
+🌍 国外媒体 = select, 🚀 节点选择, DIRECT
+📲 电报信息 = select, 🚀 节点选择, DIRECT
+🎯 全球直连 = select, DIRECT
 🛑 广告拦截 = select, REJECT, DIRECT
 🐟 漏网之鱼 = select, 🚀 节点选择, 🎯 全球直连
 
@@ -895,7 +1007,7 @@ ${proxies.join('\n')}
 [Proxy Group]
 🚀 节点选择 = select, ♻️ 自动选择, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(',')}, 🎯 全球直连
 ♻️ 自动选择 = url-test, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(',')}, url=http://www.gstatic.com/generate_204, interval=300
-🎯 全球直连 = select, DIRECT, 🚀 节点选择
+🎯 全球直连 = select, DIRECT
 🛑 广告拦截 = select, REJECT, DIRECT
 🐟 漏网之鱼 = select, 🚀 节点选择, 🎯 全球直连
 
