@@ -44,9 +44,11 @@ pages_build_output_dir = ".vercel/output/static"
 #   2. 把命令返回的 id 回填到下面两行并去掉注释
 #   3. 重新部署（bun run pages:deploy 或 git push）
 # ⚠️ 未配置时代码可正常运行，仅 /api/shorten 与 /api/sub?id= 返回 501 提示
+# 绑定变量名：必须 SUBS_KV（代码依赖）
+# 生产环境 namespace id（回填）
 [[kv_namespaces]]
-binding = "SUBS_KV"                     # 绑定变量名：必须 SUBS_KV（代码依赖）
-id = "fa386465d7d24d97b313924ab4e11390"          # 生产环境 namespace id（回填）
+binding = "SUBS_KV"                     
+id = "fa386465d7d24d97b313924ab4e11390"          
 # preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 本地预览用 id（可选）
 
 # ---------- D1 数据库绑定 ----------
