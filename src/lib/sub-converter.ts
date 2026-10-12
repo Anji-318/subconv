@@ -638,6 +638,13 @@ function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<st
 
 
 export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: SubConfig = DEFAULT_CONFIG): string {
+  // 重名保护：mihomo 要求 proxy name 唯一；同名节点（不同服务器）追加 -2/-3 序号
+  const seenNames = new Map<string, number>();
+  nodes = nodes.map((n) => {
+    const c = seenNames.get(n.name) || 0;
+    seenNames.set(n.name, c + 1);
+    return c ? { ...n, name: `${n.name}-${c + 1}` } : n;
+  });
   const nodeNames = nodes.map((n) => n.name);
   const proxies = nodes.map((n) => {
     // 注意：这里传原始名，yamlStr 转义统一在 yamlListItem/yamlObj 输出层做一次，避免双重转义
