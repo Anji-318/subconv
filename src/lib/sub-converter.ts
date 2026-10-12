@@ -469,36 +469,28 @@ export function parseConfigIni(ini: string): SubConfig {
       if (parts.length >= 2 && parts[0] && parts[1]) cfg.groups.push({ name: parts[0], type: parts[1], opts: parts.slice(2) });
       continue;
     }
-    // 标准 subconverter 格式分支内，替换原来的 ruleset 处理：
     const rp = line.match(/^ruleset\s*=(.+)$/i);
     if (rp) {
+      // 格式：tag,url[,target]
       const parts = rp[1].trim().split(',').map((s) => s.trim());
-      if (parts.length >= 2 && parts[0] && parts[1]) {
-        // subconverter 内联规则：ruleset=<目标组>,[]<规则体>（规则体本身可含逗号）
-        if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2); // 去掉 []，如 "GEOIP,CN"
-          cfg.customRules.push(`${body},${parts[0]}`);
-        } else {
-          cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
-        }
-      }
+      if (parts.length >= 2 && parts[0] && parts[1]) cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
       continue;
     }
     const cr = line.match(/^custom_rule\s*=(.+)$/i);
     if (cr) { cfg.customRules.push(cr[1].trim()); continue; }
     // [custom] 段内其他键（include_remarks= 等）直接忽略
 
-    // [ruleset] 简化段分支内同样处理：
-    if (section === 'ruleset') {
+    // 简化段格式
+    if (section === 'custom_proxy_group') {
+      // 格式：name`type`opt1`opt2`...
+      const parts = line.split('`');
+      if (parts.length >= 2) cfg.groups.push({ name: parts[0], type: parts[1], opts: parts.slice(2) });
+    } else if (section === 'ruleset') {
+      // 格式：tag,url  或  tag,url,target（subconverter 用 , 分隔）
       const parts = line.split(',').map((s) => s.trim());
-      if (parts.length >= 2) {
-        if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2);
-          cfg.customRules.push(`${body},${parts[0]}`);
-        } else {
-          cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
-        }
-      }
+      if (parts.length >= 2) cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
+    } else if (section === 'custom_rule') {
+      cfg.customRules.push(line);
     }
   }
   return cfg;
