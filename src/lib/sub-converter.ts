@@ -475,7 +475,8 @@ export function parseConfigIni(ini: string): SubConfig {
       if (parts.length >= 2 && parts[0] && parts[1]) {
         // subconverter 内联规则：ruleset=<目标组>,[]<规则体>（规则体本身可含逗号）
         if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2); // 去掉 []，如 "GEOIP,CN"
+          let body = parts.slice(1).join(',').slice(2); // 去掉 []，如 "GEOIP,CN"
+          if (body === 'FINAL') body = 'MATCH'; // subconverter 的 []FINAL → mihomo 的 MATCH
           cfg.customRules.push(`${body},${parts[0]}`);
         } else {
           cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
@@ -497,7 +498,8 @@ export function parseConfigIni(ini: string): SubConfig {
       const parts = line.split(',').map((s) => s.trim());
       if (parts.length >= 2) {
         if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2);
+          let body = parts.slice(1).join(',').slice(2);
+          if (body === 'FINAL') body = 'MATCH'; // subconverter 的 []FINAL → mihomo 的 MATCH
           cfg.customRules.push(`${body},${parts[0]}`);
         } else {
           cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
