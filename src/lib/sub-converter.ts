@@ -589,25 +589,28 @@ function breakGroupCycles(groups: { name: string; type: string; proxies: string[
 }
 
 /** 构建规则列表：自定义规则 + 远程规则集引用 */
-function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<string, unknown>[] } {
+function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<string, Record<string, unknown>> } {
   const rules: string[] = [];
-  const ruleProviders: Record<string, unknown>[] = [];
+  // ⚠️ Clash/mihomo 的 rule-providers 必须是“映射”结构（tag 名 → 配置对象），
+  // 写成 YAML 数组会导致客户端报错：cannot unmarshal !!seq into map[string]map[string]interface {}
+  const ruleProviders: Record<string, Record<string, unknown>> = {};
   const groupNames = new Set(cfg.groups.map((g) => g.name));
   // 远程规则集转为 rule-providers + RULE-SET 规则
   cfg.rulesets.forEach((rs, i) => {
-    // tag 必须唯一且仅含安全字符：加索引前缀防止中文组名 sanitize 后互相冲突
-    const sanitized = rs.tag.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'ruleset';
+    // tag 必须唯一且仅含安全字符：rs{i} 前缀保证唯一（防中文组名 sanitize 后互相冲突）；
+    // 取规则集 URL 文件名增强可读性（如 rs0_LocalAreaNetwork）
+    const fileBase = (rs.url.split('/').pop() || '').replace(/\.(list|yaml|yml|txt|ini)$/i, '');
+    const sanitized = fileBase.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'ruleset';
     const tag = `rs${i}_${sanitized}`;
     const isYaml = rs.url.endsWith('.yaml') || rs.url.endsWith('.yml');
-    ruleProviders.push({
-      tag,
+    ruleProviders[tag] = {
       type: 'http',
       behavior: 'classical',
       format: isYaml ? 'yaml' : 'text',
       url: rs.url,
       interval: 86400,
       path: `./ruleset/${tag}.${isYaml ? 'yaml' : 'txt'}`,
-    });
+    };
     // 目标组优先级：ini 显式 target > 与组名一致的 tag > 默认 🚀 节点选择
     const target = rs.target || (groupNames.has(rs.tag) ? rs.tag : '🚀 节点选择');
     rules.push(`RULE-SET,${tag},${target}`);
@@ -691,7 +694,11 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
   const proxyList = proxies.map((p) => yamlListItem(p, 1)).join('\n');
   const groups = expandGroups(config, nodeNames);
   const { rules, ruleProviders } = buildRules(config);
-  const ruleProvidersYaml = ruleProviders.length ? `\nrule-providers:\n${ruleProviders.map((rp) => yamlListItem(rp, 1)).join('\n')}\n` : '';
+  // rule-providers 输出为映射（tag 名为 key），不能写成列表项
+  const rpEntries = Object.entries(ruleProviders);
+  const ruleProvidersYaml = rpEntries.length
+    ? `\nrule-providers:\n${rpEntries.map(([tag, rp]) => yamlObj({ [tag]: rp }, 1)).join('\n')}\n`
+    : '';
   const rulesYaml = rules.map((r) => `  - ${r}`).join('\n');
 
   return `# ${subName} - Clash 配置
