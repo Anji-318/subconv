@@ -489,7 +489,7 @@ export function parseConfigIni(ini: string): SubConfig {
     // [custom] 段内其他键（include_remarks= 等）直接忽略
 
     // [ruleset] 简化段分支内同样处理：
-    } else if (section === 'ruleset') {
+    if (section === 'ruleset') {
       const parts = line.split(',').map((s) => s.trim());
       if (parts.length >= 2) {
         if (parts[1].startsWith('[]')) {
