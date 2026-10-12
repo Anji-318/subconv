@@ -108,9 +108,11 @@ check('ruleset tag 保留中文组名', cfg.rulesets[0].tag === '🎯 全球直�
 check('custom_rule 解析', cfg.customRules.length === 1);
 const clash3 = toClash(nodes, 'ini测试', cfg);
 const doc3 = parse(clash3) as any;
-const rps = doc3['rule-providers'] ?? [];
-const rpTags = (rps as any[]).map(r => r.tag);
+const rps = doc3['rule-providers'] ?? {};
+// rule-providers 现为映射结构（key = tag），中文组名不再冲突由 rs{i} 前缀保证
+const rpTags = Object.keys(rps);
 check('rule-providers tag 唯一（中文组名不再冲突）', new Set(rpTags).size === rpTags.length, JSON.stringify(rpTags));
+check('rule-providers 是映射而非数组（mihomo 兼容）', !Array.isArray(rps));
 const rules3 = doc3.rules as string[];
 check('RULE-SET 目标使用 ini 指定的组（组已定义）', rules3.some(r => r.startsWith('RULE-SET,rs0_') && r.endsWith(',🎯 全球直连')), rules3.filter(r => r.startsWith('RULE-SET')).join(' ; '));
 check('RULE-SET 目标第二组=节点选择', rules3.some(r => r.startsWith('RULE-SET,rs1_') && r.endsWith(',🚀 节点选择')));
@@ -361,6 +363,25 @@ check('同端口不同 uuid 不误去重', parseSubscription(samePortDiffUuid).l
 // 极端混排：整份 YAML + 独立 base64 行(2条链接) + sing-box JSON 全拼一坨（单次解析全识别）
 const extremeMixed = CLASH_YAML_INPUT + '\n' + b64LinkSub + '\n' + SINGBOX_JSON;
 check('极端混排：YAML+base64行+singbox 一次解析 = 11 节点', parseSubscription(extremeMixed).length === 11, `实际 ${parseSubscription(extremeMixed).length}`);
+
+// ===== [11] rule-providers 必须输出为映射（数组会导致 mihomo 报 "cannot unmarshal !!seq into map[...]"）=====
+const rpIni = [
+  '[custom_proxy_group]',
+  '🚀 节点选择`select`[]♻️ 自动选择`[]🎯 全球直连',
+  '♻️ 自动选择`url-test`[].*`http://www.gstatic.com/generate_204`300,50',
+  '[ruleset]',
+  '局域网,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/LocalAreaNetwork.list,🎯 全球直连',
+  'GoogleFCM,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/GoogleFCM.list,♻️ 自动选择',
+].join('\n');
+const rpConfig = parseConfigIni(rpIni);
+const rpYaml = toClash(parseSubscription('vless://uuid-rp@1.2.3.4:443?type=ws#RP-节点'), 'RP测试', rpConfig);
+const rpDoc = parse(rpYaml) as any;
+const rpMap = rpDoc?.['rule-providers'];
+check('rule-providers 是映射而非数组（mihomo 兼容关键）', !!rpMap && !Array.isArray(rpMap) && typeof rpMap === 'object');
+check('rule-providers tag 取 URL 文件名（可读性）', !!rpMap && Object.keys(rpMap).includes('rs0_LocalAreaNetwork') && Object.keys(rpMap).includes('rs1_GoogleFCM'));
+check('rule-providers 字段完整（type/behavior/url/path）', !!rpMap && rpMap['rs0_LocalAreaNetwork']?.type === 'http' && rpMap['rs0_LocalAreaNetwork']?.behavior === 'classical' && String(rpMap['rs0_LocalAreaNetwork']?.url).endsWith('LocalAreaNetwork.list') && rpMap['rs0_LocalAreaNetwork']?.path === './ruleset/rs0_LocalAreaNetwork.txt');
+check('RULE-SET 引用名与 rule-providers key 一一对应', !!rpMap && rpYaml.includes('RULE-SET,rs0_LocalAreaNetwork,🎯 全球直连') && rpYaml.includes('RULE-SET,rs1_GoogleFCM,♻️ 自动选择'));
+check('rule-providers 段无残留列表写法', !/^  - tag:/m.test(rpYaml));
 
 console.log(`\n========== 结果: ${pass} 通过, ${fail} 失败 ==========`);
 process.exit(fail ? 1 : 0);
