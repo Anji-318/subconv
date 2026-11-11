@@ -3,7 +3,7 @@
  * 场景：机场/聚合面板返回的是一整份 Clash/mihomo YAML 配置（含顶层 proxies: 段），
  * 而不是节点分享链接或 Base64。此处把 YAML 里的 proxies 反向映射回 NodeInfo，
  * 让转换器也能"吃"这种格式。
- * 支持类型：vless / vmess / trojan / ss（带 plugin 的 ss 无法无损往返，跳过）。
+ * 支持类型：vless / vmess / trojan / ss / anytls / hysteria2 / tuic（带 plugin 的 ss 无法无损往返，跳过）。
  * 不支持类型（http/socks5/hysteria2/tuic 等）自动跳过，不影响其余节点。
  */
 import { parse } from 'yaml';
@@ -101,6 +101,52 @@ function entryToNode(e: Record<string, unknown>): NodeInfo | null {
       host, path, alpn, fp,
       tls: true, // trojan 恒为 TLS
       params,
+    };
+  }
+
+  if (type === 'anytls') {
+    const password = asStr(e.password);
+    if (!password) return null;
+    return {
+      protocol: 'anytls',
+      server, port, password, name,
+      network: 'tcp',
+      sni: sni ?? server,
+      alpn, fp,
+      tls: true, // AnyTLS 恒走 TLS
+      skipCertVerify: e['skip-cert-verify'] === true || e['skip-cert-verify'] === 'true',
+      params: {},
+    };
+  }
+
+  if (type === 'hysteria2') {
+    const password = asStr(e.password);
+    if (!password) return null;
+    return {
+      protocol: 'hysteria2', server, port, password, name,
+      sni: sni ?? server, alpn: alpn ?? 'h3',
+      skipCertVerify: e['skip-cert-verify'] === true,
+      obfs: asStr(e.obfs), obfsPassword: asStr(e['obfs-password']),
+      ports: asStr(e.ports), up: asStr(e.up), down: asStr(e.down),
+      fingerprint: asStr(e.fingerprint),
+      tls: true, params: {},
+    };
+  }
+
+  if (type === 'tuic') {
+    const uuid = asStr(e.uuid);
+    const password = asStr(e.password);
+    const token = asStr(e.token);
+    if (!token && !uuid) return null;
+    return {
+      protocol: 'tuic', server, port, uuid, password, token, name,
+      sni: sni ?? server, alpn: alpn ?? 'h3',
+      congestionController: asStr(e['congestion-controller']),
+      udpRelayMode: asStr(e['udp-relay-mode']),
+      disableSni: e['disable-sni'] === true,
+      reduceRtt: e['reduce-rtt'] === true,
+      skipCertVerify: e['skip-cert-verify'] === true,
+      tls: true, params: {},
     };
   }
 

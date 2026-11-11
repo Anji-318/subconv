@@ -157,10 +157,12 @@ export async function GET(request: NextRequest) {
   const meta = TARGET_META[params.target];
   const body = meta.fn(processed, params.name, config);
 
+  // 文件名用 RFC 5987 编码支持中文：旧客户端用回退名 subscription.ext，新客户端用自定义名称
+  const fileBase = encodeURIComponent(params.name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16)}`);
   return new NextResponse(body, {
     headers: {
       'Content-Type': meta.ct,
-      'Content-Disposition': `attachment; filename="subscription.${meta.ext}"`,
+      'Content-Disposition': `attachment; filename="subscription.${meta.ext}"; filename*=UTF-8''${fileBase}.${meta.ext}`,
       'Cache-Control': 'no-store',
       'Subscription-Userinfo': `nodes=${processed.length}`,
       ...(contentRes.failed.length ? { 'X-Subconv-Warning': `${contentRes.failed.length} 个订阅源获取失败已跳过` } : {}),

@@ -95,6 +95,9 @@ const PROTOCOL_BADGE: Record<string, string> = {
   vmess: 'border-sky-500/30 bg-sky-500/15 text-sky-300',
   trojan: 'border-amber-500/30 bg-amber-500/15 text-amber-300',
   ss: 'border-zinc-500/30 bg-zinc-500/15 text-zinc-300',
+  anytls: 'border-fuchsia-500/30 bg-fuchsia-500/15 text-fuchsia-300',
+  hysteria2: 'border-violet-500/30 bg-violet-500/15 text-violet-300',
+  tuic: 'border-rose-500/30 bg-rose-500/15 text-rose-300',
 }
 
 function ProtocolBadge({ protocol }: { protocol: string }) {

@@ -172,7 +172,7 @@ curl "https://subconv.pages.dev/api/sub?target=surge&url=https://example.com/sub
 - 多个订阅源用 `\|` 分隔（前端输入框支持换行分隔），逐源独立解析后合并；
 - 不同格式可任意混用（例如一个机场给 Base64、另一个给 Clash YAML）；
 - 单个源拉取失败不影响其他源，全部失败才报错并注明具体原因；
-- Clash YAML 输入支持 vless/vmess/trojan/ss 四种协议及 WebSocket / gRPC / H2 / XHTTP / REALITY 传输层；`type: http` 等普通代理节点自动跳过。
+- Clash YAML 输入支持 vless/vmess/trojan/ss/anytls/hysteria2/tuic 七种协议及 WebSocket / gRPC / H2 / XHTTP / REALITY 传输层；`type: http` 等普通代理节点自动跳过。
 
 #### 调用示例汇总
 
@@ -532,7 +532,7 @@ A:
 ## 功能清单
 
 - ✅ 8 种客户端格式转换（Clash/Clash.Meta/sing-box/Surge/QuantumultX/Loon/V2Ray/Mixed）
-- ✅ 4 种协议解析（vless/vmess/trojan/ss）
+- ✅ 7 种协议解析（vless/vmess/trojan/ss/anytls/hysteria2/tuic）
 - ✅ 5 种输入格式自动识别混排（节点链接/Base64/Clash YAML/sing-box JSON/v2ray JSON）
 - ✅ 多订阅合并（逐源独立解析，格式任意混用，单源失败不影响整体）
 - ✅ 订阅拉取失败原因诊断（区分 DNS / HTTP 状态 / 防护拦截 / 内容为空）

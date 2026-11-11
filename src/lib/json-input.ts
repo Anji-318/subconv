@@ -2,7 +2,7 @@
  * JSON 订阅输入支持
  * - sing-box 完整配置（{ outbounds: [...] }）
  * - v2ray JSON 订阅（[ { add/port/id/ps... }, ... ]，v2rayN 分享 JSON 数组格式）
- * 仅提取 vless/vmess/trojan/ss；其余协议（hysteria2/tuic/wireguard 等）自动跳过，不影响其余节点。
+ * 仅提取 vless/vmess/trojan/ss/anytls/hysteria2/tuic；其余协议（wireguard 等）自动跳过，不影响其余节点。
  */
 import type { NodeInfo } from './sub-converter';
 
@@ -143,6 +143,55 @@ export function parseSingboxJson(content: string): NodeInfo[] {
           fp: s(utls.fingerprint),
           tls: true, // trojan 恒为 TLS
           params,
+        });
+        continue;
+      }
+      if (type === 'anytls') {
+        const password = s(o.password);
+        if (!password) continue;
+        nodes.push({
+          protocol: 'anytls',
+          server, port, password, name,
+          network: 'tcp',
+          sni: s(tlsObj.server_name) ?? server,
+          alpn,
+          fp: s(utls.fingerprint),
+          tls: true, // AnyTLS 恒走 TLS
+          skipCertVerify: tlsObj.insecure === true,
+          params,
+        });
+        continue;
+      }
+      if (type === 'hysteria2') {
+        const password = s(o.password);
+        if (!password) continue;
+        const obfsObj = (o.obfs ?? {}) as Record<string, unknown>;
+        nodes.push({
+          protocol: 'hysteria2', server, port, password, name,
+          sni: s(tlsObj.server_name) ?? server,
+          alpn: alpn || 'h3',
+          skipCertVerify: tlsObj.insecure === true,
+          obfs: s(obfsObj.type), obfsPassword: s(obfsObj.password),
+          up: o.up_mbps !== undefined ? `${o.up_mbps} Mbps` : undefined,
+          down: o.down_mbps !== undefined ? `${o.down_mbps} Mbps` : undefined,
+          tls: true, params,
+        });
+        continue;
+      }
+      if (type === 'tuic') {
+        const uuid = s(o.uuid);
+        const password = s(o.password);
+        const tokenV4 = s(o.token);
+        if (!uuid && !tokenV4) continue;
+        nodes.push({
+          protocol: 'tuic', server, port, uuid, password, token: tokenV4, name,
+          sni: s(tlsObj.server_name) ?? server,
+          alpn: alpn || 'h3',
+          congestionController: s(o.congestion_control),
+          udpRelayMode: s(o.udp_relay_mode),
+          reduceRtt: o.zero_rtt_handshake === true,
+          skipCertVerify: tlsObj.insecure === true,
+          tls: true, params,
         });
         continue;
       }

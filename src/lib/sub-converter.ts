@@ -1,6 +1,6 @@
 /**
  * 订阅转换核心库
- * 支持：vless/vmess/trojan/ss 链接解析、Clash YAML 配置输入 → clash/singbox/v2ray 输出
+ * 支持：vless/vmess/trojan/ss/anytls/hysteria2/tuic 链接解析、Clash YAML 配置输入 → clash/singbox/v2ray 输出
  */
 
 import { looksLikeClashYaml, parseClashYamlProxies } from './clash-input';
@@ -8,11 +8,11 @@ import { parseSingboxJson, parseV2rayJsonArray, extractJsonBlocks } from './json
 
 /** 未解析到节点时的统一提示（列明全部支持格式与多订阅合并用法） */
 export const NO_NODES_HINT =
-  '未解析到有效节点：支持 节点分享链接（vless/vmess/trojan/ss，每行一个）、Base64 订阅、'
+  '未解析到有效节点：支持 节点分享链接（vless/vmess/trojan/ss/anytls/hysteria2/tuic，每行一个）、Base64 订阅、'
   + 'Clash/mihomo YAML 配置（含 proxies: 段）、sing-box JSON 配置、v2ray JSON 订阅。'
   + '多个订阅链接用 | 分隔可合并（不同格式可混用）。请确认订阅返回的是以上格式之一。';
 
-export type Protocol = 'vless' | 'vmess' | 'trojan' | 'ss';
+export type Protocol = 'vless' | 'vmess' | 'trojan' | 'ss' | 'anytls' | 'hysteria2' | 'tuic';
 
 export interface NodeInfo {
   protocol: Protocol;
@@ -33,6 +33,18 @@ export interface NodeInfo {
   flow?: string;
   alterId?: number;    // vmess
   tls?: boolean;
+  skipCertVerify?: boolean;  // TLS 跳过证书校验
+  token?: string;            // tuic v4
+  obfs?: string;             // hysteria2 流量混淆类型
+  obfsPassword?: string;
+  congestionController?: string; // tuic
+  udpRelayMode?: string;         // tuic
+  disableSni?: boolean;          // tuic
+  reduceRtt?: boolean;           // tuic
+  ports?: string;                // hysteria2 端口跳跃
+  up?: string;                   // hysteria2 上行速率
+  down?: string;                 // hysteria2 下行速率
+  fingerprint?: string;          // hysteria2 证书指纹(pinSHA256)
   params?: Record<string, string>;
 }
 
@@ -53,7 +65,8 @@ function queryToObj(q: string): Record<string, string> {
   const o: Record<string, string> = {};
   for (const pair of q.split('&')) {
     const [k, v] = pair.split('=');
-    if (k) o[decodeURIComponent(k)] = decodeURIComponent(v ?? '');
+    // URL query 中 + 表示空格（URLSearchParams.toString 会这样编码）
+    if (k) o[decodeURIComponent(k)] = decodeURIComponent(String(v ?? '').replace(/\+/g, ' '));
   }
   return o;
 }
@@ -67,6 +80,9 @@ export function parseLine(line: string): NodeInfo | null {
     if (line.startsWith('vmess://')) return parseVmess(line);
     if (line.startsWith('trojan://')) return parseTrojan(line);
     if (line.startsWith('ss://')) return parseSS(line);
+    if (line.startsWith('anytls://')) return parseAnyTLS(line);
+    if (line.startsWith('hysteria2://') || line.startsWith('hy2://')) return parseHysteria2(line);
+    if (line.startsWith('tuic://')) return parseTuic(line);
   } catch { }
   return null;
 }
@@ -177,6 +193,86 @@ function parseSS(url: string): NodeInfo | null {
   };
 }
 
+/** 解析 anytls:// 分享链接（Mihomo / sing-box 1.12+ 支持的 AnyTLS 协议） */
+function parseAnyTLS(url: string): NodeInfo | null {
+  const u = new URL(url);
+  const password = decodeURIComponent(u.username);
+  const host = u.hostname;
+  const port = parseInt(u.port) || 443;
+  if (!password || !host) return null;
+  const p = queryToObj(u.search.slice(1));
+  return {
+    protocol: 'anytls',
+    server: host, port, password,
+    name: decodeURIComponent(u.hash.slice(1)) || `${host}:${port}`,
+    network: (p.type || 'tcp') as NodeInfo['network'],
+    sni: p.sni || p.peer || host,
+    alpn: p.alpn,
+    fp: p.fp,
+    tls: (p.security || 'tls') !== 'none',
+    skipCertVerify: ['insecure', 'allowInsecure'].some((k) => p[k] === '1' || p[k] === 'true'),
+    params: p,
+  };
+}
+
+/** 参数布尔值（1/true/yes/on） */
+function truthy(v?: string): boolean {
+  return ['1', 'true', 'yes', 'on'].includes(String(v ?? '').toLowerCase());
+}
+
+/** 解析 hysteria2:// / hy2:// 分享链接 */
+function parseHysteria2(url: string): NodeInfo | null {
+  const u = new URL(url);
+  const password = decodeURIComponent(u.username);
+  const host = u.hostname;
+  const port = parseInt(u.port) || 443;
+  if (!password || !host) return null;
+  const p = queryToObj(u.search.slice(1));
+  return {
+    protocol: 'hysteria2', server: host, port, password,
+    name: decodeURIComponent(u.hash.slice(1)) || `${host}:${port}`,
+    sni: p.sni || host,
+    alpn: p.alpn || 'h3',
+    skipCertVerify: truthy(p.insecure) || truthy(p.allowInsecure),
+    obfs: p.obfs,
+    obfsPassword: p['obfs-password'] || p.obfsPassword,
+    fingerprint: p.pinSHA256 || p.pin || p.fingerprint,
+    ports: p.mport || p.ports,
+    up: p.up, down: p.down,
+    tls: (p.security || 'tls') !== 'none',
+    params: p,
+  };
+}
+
+/** 解析 tuic:// 分享链接（v5: uuid:password@；v4: token@） */
+function parseTuic(url: string): NodeInfo | null {
+  const u = new URL(url);
+  const user = decodeURIComponent(u.username);
+  const pass = decodeURIComponent(u.password);
+  const host = u.hostname;
+  const port = parseInt(u.port) || 443;
+  if (!user || !host) return null;
+  const p = queryToObj(u.search.slice(1));
+  // URL 会把 userinfo 里的冒号拆成 username/password；有 password 或显式 version=5 视为 v5
+  const isV4 = !pass && (p.version === '4' || !!p.token);
+  return {
+    protocol: 'tuic', server: host, port,
+    uuid: isV4 ? undefined : user,
+    password: isV4 ? undefined : pass,
+    token: isV4 ? (p.token || user) : undefined,
+    name: decodeURIComponent(u.hash.slice(1)) || `${host}:${port}`,
+    sni: p.sni || host,
+    alpn: p.alpn || 'h3',
+    congestionController: p.congestion_control || p['congestion-controller'] || 'bbr',
+    udpRelayMode: p.udp_relay_mode || p['udp-relay-mode'] || 'native',
+    disableSni: truthy(p.disable_sni),
+    reduceRtt: truthy(p.reduce_rtt),
+    skipCertVerify: truthy(p.allow_insecure) || truthy(p.insecure) || truthy(p.allowInsecure),
+    tls: true,
+    params: p,
+  };
+}
+
 /** 解析订阅内容：自动识别 Clash YAML / sing-box JSON / v2ray JSON / Base64 / 逐行链接，可混排 */
 export function parseSubscription(content: string): NodeInfo[] {
   return dedupeParsed(parseAny(content, 0));
@@ -205,7 +301,7 @@ function parseAny(content: string, depth: number): NodeInfo[] {
   if (out.length === 0 && !trimmed.includes('://')) {
     const decoded = b64Decode(trimmed.replace(/\s/g, '')).trim();
     if (decoded) {
-      const looksUseful = /(vless|vmess|trojan|ss):\/\//i.test(decoded)
+      const looksUseful = /(vless|vmess|trojan|ss|anytls|hysteria2|hy2|tuic):\/\//i.test(decoded)
         || decoded.includes('proxies:')
         || decoded.includes('"outbounds"');
       if (looksUseful) out.push(...parseAny(decoded, depth + 1));
@@ -220,7 +316,7 @@ function parseAny(content: string, depth: number): NodeInfo[] {
     if (n) { out.push(n); continue; }
     if (!t.includes('://') && t.length >= 16 && /^[A-Za-z0-9+/=_-]+$/.test(t)) {
       const dec = b64uDecode(t).trim();
-      if (dec && /(vless|vmess|trojan|ss):\/\//i.test(dec)) {
+      if (dec && /(vless|vmess|trojan|ss|anytls|hysteria2|hy2|tuic):\/\//i.test(dec)) {
         out.push(...parseAny(dec, depth + 1));
       }
     }
@@ -272,9 +368,9 @@ export function renameNodes(nodes: NodeInfo[], opts: { prefix?: string; mode: 'p
 export function getUnsupported(target: string, nodes: NodeInfo[]): { protocol: string; count: number }[] {
   // Surge/Loon/QuantumultX 不原生支持 vless
   const unsupportedMap: Record<string, string[]> = {
-    surge: ['vless'],
-    loon: ['vless'],
-    quantumultx: ['vless'],
+    surge: ['vless', 'anytls', 'hysteria2', 'tuic'],
+    loon: ['vless', 'anytls', 'hysteria2', 'tuic'],
+    quantumultx: ['vless', 'anytls', 'hysteria2', 'tuic'],
   };
   const list = unsupportedMap[target] || [];
   if (list.length === 0) return [];
@@ -469,14 +565,14 @@ export function parseConfigIni(ini: string): SubConfig {
       if (parts.length >= 2 && parts[0] && parts[1]) cfg.groups.push({ name: parts[0], type: parts[1], opts: parts.slice(2) });
       continue;
     }
-    // 标准 subconverter 格式分支内，替换原来的 ruleset 处理：
     const rp = line.match(/^ruleset\s*=(.+)$/i);
     if (rp) {
       const parts = rp[1].trim().split(',').map((s) => s.trim());
       if (parts.length >= 2 && parts[0] && parts[1]) {
         // subconverter 内联规则：ruleset=<目标组>,[]<规则体>（规则体本身可含逗号）
         if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2); // 去掉 []，如 "GEOIP,CN"
+          let body = parts.slice(1).join(',').slice(2); // 去掉 []，如 "GEOIP,CN"
+          if (body === 'FINAL') body = 'MATCH'; // subconverter 的 []FINAL → mihomo 的 MATCH
           cfg.customRules.push(`${body},${parts[0]}`);
         } else {
           cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
@@ -488,17 +584,25 @@ export function parseConfigIni(ini: string): SubConfig {
     if (cr) { cfg.customRules.push(cr[1].trim()); continue; }
     // [custom] 段内其他键（include_remarks= 等）直接忽略
 
-    // [ruleset] 简化段分支内同样处理：
-    if (section === 'ruleset') {
+    // 简化段格式
+    if (section === 'custom_proxy_group') {
+      // 格式：name`type`opt1`opt2`...
+      const parts = line.split('`');
+      if (parts.length >= 2) cfg.groups.push({ name: parts[0], type: parts[1], opts: parts.slice(2) });
+    } else if (section === 'ruleset') {
+      // 格式：tag,url  或  tag,url,target（subconverter 用 , 分隔）；[] 开头为内联规则
       const parts = line.split(',').map((s) => s.trim());
       if (parts.length >= 2) {
         if (parts[1].startsWith('[]')) {
-          const body = parts.slice(1).join(',').slice(2);
+          let body = parts.slice(1).join(',').slice(2);
+          if (body === 'FINAL') body = 'MATCH'; // subconverter 的 []FINAL → mihomo 的 MATCH
           cfg.customRules.push(`${body},${parts[0]}`);
         } else {
           cfg.rulesets.push({ tag: parts[0], url: parts[1], target: parts[2] || undefined });
         }
       }
+    } else if (section === 'custom_rule') {
+      cfg.customRules.push(line);
     }
   }
   return cfg;
@@ -630,6 +734,13 @@ function buildRules(cfg: SubConfig): { rules: string[]; ruleProviders: Record<st
 
 
 export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: SubConfig = DEFAULT_CONFIG): string {
+  // 重名保护：mihomo 要求 proxy name 唯一；同名节点（不同服务器）追加 -2/-3 序号
+  const seenNames = new Map<string, number>();
+  nodes = nodes.map((n) => {
+    const c = seenNames.get(n.name) || 0;
+    seenNames.set(n.name, c + 1);
+    return c ? { ...n, name: `${n.name}-${c + 1}` } : n;
+  });
   const nodeNames = nodes.map((n) => n.name);
   const proxies = nodes.map((n) => {
     // 注意：这里传原始名，yamlStr 转义统一在 yamlListItem/yamlObj 输出层做一次，避免双重转义
@@ -689,6 +800,46 @@ export function toClash(nodes: NodeInfo[], subName = '订阅转换', config: Sub
         }
       }
       if (n.alpn) base['alpn'] = n.alpn.split(',');
+    } else if (n.protocol === 'anytls') {
+      base.type = 'anytls';
+      base.server = n.server;
+      base.port = n.port;
+      base.password = n.password;
+      if (n.sni) base.sni = n.sni;
+      if (n.alpn) base.alpn = n.alpn.split(',');
+      if (n.fp) base['client-fingerprint'] = n.fp;
+      if (n.skipCertVerify) base['skip-cert-verify'] = true;
+      base.udp = true;
+      base['idle-session-check-interval'] = 30;
+      base['idle-session-timeout'] = 30;
+      base['min-idle-session'] = 0;
+    } else if (n.protocol === 'hysteria2') {
+      base.type = 'hysteria2';
+      base.server = n.server;
+      base.port = n.port;
+      base.password = n.password;
+      if (n.sni) base.sni = n.sni;
+      if (n.alpn) base.alpn = n.alpn.split(',');
+      if (n.skipCertVerify) base['skip-cert-verify'] = true;
+      if (n.obfs) { base.obfs = n.obfs; if (n.obfsPassword) base['obfs-password'] = n.obfsPassword; }
+      if (n.ports) base.ports = n.ports;
+      if (n.up) base.up = n.up;
+      if (n.down) base.down = n.down;
+      if (n.fingerprint) base.fingerprint = n.fingerprint;
+    } else if (n.protocol === 'tuic') {
+      base.type = 'tuic';
+      base.server = n.server;
+      base.port = n.port;
+      if (n.token) base.token = n.token;
+      if (n.uuid) base.uuid = n.uuid;
+      if (n.password) base.password = n.password;
+      if (n.sni) base.sni = n.sni;
+      if (n.alpn) base.alpn = n.alpn.split(',');
+      if (n.congestionController) base['congestion-controller'] = n.congestionController;
+      if (n.udpRelayMode) base['udp-relay-mode'] = n.udpRelayMode;
+      if (n.disableSni) base['disable-sni'] = true;
+      if (n.reduceRtt) base['reduce-rtt'] = true;
+      if (n.skipCertVerify) base['skip-cert-verify'] = true;
     } else if (n.protocol === 'ss') {
       base.type = 'ss';
       base.server = n.server;
@@ -790,6 +941,38 @@ export function toSingbox(nodes: NodeInfo[], subName = '订阅转换'): string {
       if (n.network === 'ws') {
         ob.transport = { type: 'ws', path: n.path || '/', headers: { Host: n.host || n.sni } };
       }
+    } else if (n.protocol === 'anytls') {
+      ob.password = n.password;
+      ob.tls = {
+        enabled: true,
+        server_name: n.sni || n.server,
+        insecure: !!n.skipCertVerify,
+        ...(n.alpn ? { alpn: n.alpn.split(',') } : {}),
+        ...(n.fp ? { utls: { enabled: true, fingerprint: n.fp } } : {}),
+      };
+      ob['idle_session_check_interval'] = '30s';
+      ob['idle_session_timeout'] = '30s';
+      ob.min_idle_session = 0;
+    } else if (n.protocol === 'hysteria2') {
+      ob.password = n.password;
+      ob.tls = {
+        enabled: true, server_name: n.sni || n.server, insecure: !!n.skipCertVerify,
+        ...(n.alpn ? { alpn: n.alpn.split(',') } : {}),
+      };
+      if (n.obfs) ob.obfs = { type: n.obfs, password: n.obfsPassword || '' };
+      if (n.up) ob.up_mbps = parseInt(n.up) || undefined;
+      if (n.down) ob.down_mbps = parseInt(n.down) || undefined;
+    } else if (n.protocol === 'tuic') {
+      if (n.token) ob.token = n.token;
+      if (n.uuid) ob.uuid = n.uuid;
+      if (n.password) ob.password = n.password;
+      ob.congestion_control = n.congestionController || 'bbr';
+      ob.udp_relay_mode = n.udpRelayMode || 'native';
+      if (n.reduceRtt) ob.zero_rtt_handshake = true;
+      ob.tls = {
+        enabled: true, server_name: n.sni || n.server, insecure: !!n.skipCertVerify,
+        alpn: n.alpn ? n.alpn.split(',') : ['h3'],
+      };
     } else if (n.protocol === 'ss') {
       ob.method = n.method;
       ob.password = n.password;
@@ -876,6 +1059,42 @@ export function toLink(n: NodeInfo): string {
     if (n.sni) p.set('sni', n.sni);
     if (n.host) p.set('host', n.host);
     return `trojan://${encodeURIComponent(n.password || '')}@${n.server}:${n.port}?${p.toString()}#${encodeURIComponent(n.name)}`;
+  }
+  if (n.protocol === 'anytls') {
+    const p = new URLSearchParams();
+    p.set('security', 'tls');
+    if (n.sni) p.set('sni', n.sni);
+    if (n.fp) p.set('fp', n.fp);
+    if (n.alpn) p.set('alpn', n.alpn);
+    if (n.skipCertVerify) { p.set('insecure', '1'); p.set('allowInsecure', '1'); }
+    p.set('type', 'tcp');
+    return `anytls://${encodeURIComponent(n.password || '')}@${n.server}:${n.port}?${p.toString()}#${encodeURIComponent(n.name)}`;
+  }
+  if (n.protocol === 'hysteria2') {
+    const p = new URLSearchParams();
+    if (n.sni) p.set('sni', n.sni);
+    if (n.alpn) p.set('alpn', n.alpn);
+    if (n.skipCertVerify) p.set('insecure', '1');
+    if (n.obfs) { p.set('obfs', n.obfs); if (n.obfsPassword) p.set('obfs-password', n.obfsPassword); }
+    if (n.ports) p.set('mport', n.ports);
+    if (n.up) p.set('up', n.up);
+    if (n.down) p.set('down', n.down);
+    if (n.fingerprint) p.set('pinSHA256', n.fingerprint);
+    return `hysteria2://${encodeURIComponent(n.password || '')}@${n.server}:${n.port}?${p.toString()}#${encodeURIComponent(n.name)}`;
+  }
+  if (n.protocol === 'tuic') {
+    const p = new URLSearchParams();
+    if (n.sni) p.set('sni', n.sni);
+    if (n.alpn) p.set('alpn', n.alpn);
+    if (n.congestionController) p.set('congestion_control', n.congestionController);
+    if (n.udpRelayMode) p.set('udp_relay_mode', n.udpRelayMode);
+    if (n.skipCertVerify) p.set('allow_insecure', '1');
+    if (n.disableSni) p.set('disable_sni', '1');
+    if (n.reduceRtt) p.set('reduce_rtt', '1');
+    const cred = n.token
+      ? encodeURIComponent(n.token)
+      : `${encodeURIComponent(n.uuid || '')}:${encodeURIComponent(n.password || '')}`;
+    return `tuic://${cred}@${n.server}:${n.port}?${p.toString()}#${encodeURIComponent(n.name)}`;
   }
   if (n.protocol === 'ss') {
     const cred = Buffer.from(`${n.method}:${n.password}`, 'utf8').toString('base64url');
@@ -969,6 +1188,8 @@ export function toSurge(nodes: NodeInfo[], subName = '订阅转换'): string {
     }
     // vless Surge 不原生支持，跳过
   }
+  // 策略组只引用实际写入 [Proxy] 的节点（跳过不支持协议时避免引用不存在的代理）
+  const supportedNames = proxies.map((line) => line.split('=')[0].trim());
   return `# ${subName} - Surge 配置
 # 生成时间: ${new Date().toISOString()}
 
@@ -983,8 +1204,8 @@ DIRECT = direct
 ${proxies.join('\n')}
 
 [Proxy Group]
-🚀 节点选择 = select, ♻️ 自动选择, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(', ')}, 🎯 全球直连
-♻️ 自动选择 = url-test, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(', ')}, url=http://www.gstatic.com/generate_204, interval=300
+🚀 节点选择 = select, ♻️ 自动选择, ${supportedNames.join(', ')}, 🎯 全球直连
+♻️ 自动选择 = url-test, ${supportedNames.join(', ')}, url=http://www.gstatic.com/generate_204, interval=300
 🌍 国外媒体 = select, 🚀 节点选择, DIRECT
 📲 电报信息 = select, 🚀 节点选择, DIRECT
 🎯 全球直连 = select, DIRECT
@@ -1013,6 +1234,7 @@ export function toQuantumultX(nodes: NodeInfo[]): string {
   const server: string[] = [];
   const filter: string[] = [];
   for (const n of nodes) {
+    const before = server.length;
     const name = n.name.replace(/[,=:]/g, ' ');
     if (n.protocol === 'ss') {
       server.push(`shadowsocks=${n.server}:${n.port}, method=${n.method}, password=${n.password}, tag=${name}, udp-relay=true`);
@@ -1022,7 +1244,7 @@ export function toQuantumultX(nodes: NodeInfo[]): string {
     } else if (n.protocol === 'trojan') {
       server.push(`trojan=${n.server}:${n.port}, password=${n.password}, tag=${name}, tls-verification=false, tls-host=${n.sni || n.server}`);
     }
-    filter.push(name);
+    if (server.length > before) filter.push(name);
   }
   return `# QuantumultX 配置
 # 生成时间: ${new Date().toISOString()}
@@ -1071,6 +1293,8 @@ export function toLoon(nodes: NodeInfo[], subName = '订阅转换'): string {
       proxies.push(`${name} = VMess,${n.server},${n.port},${n.uuid},tls=${n.tls},sni=${n.sni || n.server}`);
     }
   }
+  // 策略组只引用实际写入 [Proxy] 的节点
+  const supportedNames = proxies.map((line) => line.split('=')[0].trim());
   return `# ${subName} - Loon 配置
 # 生成时间: ${new Date().toISOString()}
 
@@ -1083,8 +1307,8 @@ DIRECT = DIRECT
 ${proxies.join('\n')}
 
 [Proxy Group]
-🚀 节点选择 = select, ♻️ 自动选择, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(',')}, 🎯 全球直连
-♻️ 自动选择 = url-test, ${nodes.map((n) => n.name.replace(/[,=:]/g, ' ')).join(',')}, url=http://www.gstatic.com/generate_204, interval=300
+🚀 节点选择 = select, ♻️ 自动选择, ${supportedNames.join(',')}, 🎯 全球直连
+♻️ 自动选择 = url-test, ${supportedNames.join(',')}, url=http://www.gstatic.com/generate_204, interval=300
 🎯 全球直连 = select, DIRECT
 🛑 广告拦截 = select, REJECT, DIRECT
 🐟 漏网之鱼 = select, 🚀 节点选择, 🎯 全球直连

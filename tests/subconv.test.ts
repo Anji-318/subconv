@@ -4,7 +4,7 @@
  */
 import { parse } from 'yaml';
 import {
-  parseSubscription, toClash, toSingbox, toV2ray, toMixed, toLink,
+  parseSubscription, toClash, toSingbox, toV2ray, toMixed, toLink, getUnsupported,
   parseConfigIni, DEFAULT_CONFIG, type SubConfig, type NodeInfo,
 } from '../src/lib/sub-converter';
 
@@ -315,12 +315,13 @@ const SINGBOX_JSON = JSON.stringify({
     { type: 'trojan', tag: 'SB-Trojan', server: '2.2.2.2', server_port: 443, password: 'sbpass',
       tls: { enabled: true, server_name: 'tr.example.com' } },
     { type: 'ss', tag: 'SB-SS', server: '3.3.3.3', server_port: 8388, method: 'aes-256-gcm', password: 'sbsspass' },
-    { type: 'hysteria2', tag: 'SB-Hy2-跳过', server: '4.4.4.4', server_port: 443, password: 'x' },
+    { type: 'hysteria2', tag: 'SB-Hy2', server: '4.4.4.4', server_port: 443, password: 'x' },
     { type: 'direct', tag: 'direct' },
   ],
 });
 const sbNodes = parseSubscription(SINGBOX_JSON);
-check('sing-box JSON 解析出 3 个节点（hysteria2/direct 跳过）', sbNodes.length === 3, `实际 ${sbNodes.length}`);
+check('sing-box JSON 解析出 4 个节点（含 hysteria2，direct 跳过）', sbNodes.length === 4, `实际 ${sbNodes.length}`);
+check('sing-box hysteria2 节点被识别', !!sbNodes.find(n => n.name === 'SB-Hy2' && n.protocol === 'hysteria2' && n.password === 'x'));
 const sbV = sbNodes.find(n => n.name === 'SB-Vless-WS');
 check('sing-box vless: uuid/flow/reality/ws 传输还原', !!sbV && sbV.uuid === 'b69cf773-da16-486e-afce-a45b94f998b3' && sbV.flow === 'xtls-rprx-vision' && sbV.pbk === 'sbpbk' && sbV.network === 'ws' && sbV.host === 'sbhost.example.com' && sbV.path === '/sbws', JSON.stringify(sbV));
 const sbT = sbNodes.find(n => n.name === 'SB-Trojan');
@@ -339,8 +340,8 @@ const dupLink = 'vless://b69cf773-da16-486e-afce-a45b94f998b3@47.238.122.8:443?t
 const extraLink = 'trojan://xpass@7.7.7.7:443?sni=mixed.example.com#🇲🇴Mixed-额外';
 const mixedContent = [CLASH_YAML_INPUT, dupLink, extraLink, SINGBOX_JSON].join('\n');
 const mixedNodes = parseSubscription(mixedContent);
-// YAML 6 + singbox 3 + 额外 trojan 1 = 10；重复的香港-1-WS 链接被去重
-check('混排合并：YAML+链接+singbox 合计 10 节点且重复项去重', mixedNodes.length === 10, `实际 ${mixedNodes.length}`);
+// YAML 6 + singbox 4 + 额外 trojan 1 = 11；重复的香港-1-WS 链接被去重
+check('混排合并：YAML+链接+singbox 合计 11 节点且重复项去重', mixedNodes.length === 11, `实际 ${mixedNodes.length}`);
 check('混排合并：额外 trojan 被识别', !!mixedNodes.find(n => n.name === '🇲🇴Mixed-额外'));
 check('混排合并：sing-box 节点被识别', !!mixedNodes.find(n => n.name === 'SB-Vless-WS'));
 
@@ -362,7 +363,7 @@ check('同端口不同 uuid 不误去重', parseSubscription(samePortDiffUuid).l
 
 // 极端混排：整份 YAML + 独立 base64 行(2条链接) + sing-box JSON 全拼一坨（单次解析全识别）
 const extremeMixed = CLASH_YAML_INPUT + '\n' + b64LinkSub + '\n' + SINGBOX_JSON;
-check('极端混排：YAML+base64行+singbox 一次解析 = 11 节点', parseSubscription(extremeMixed).length === 11, `实际 ${parseSubscription(extremeMixed).length}`);
+check('极端混排：YAML+base64行+singbox 一次解析 = 12 节点', parseSubscription(extremeMixed).length === 12, `实际 ${parseSubscription(extremeMixed).length}`);
 
 // ===== [11] rule-providers 必须输出为映射（数组会导致 mihomo 报 "cannot unmarshal !!seq into map[...]"）=====
 const rpIni = [
@@ -382,6 +383,166 @@ check('rule-providers tag 取 URL 文件名（可读性）', !!rpMap && Object.k
 check('rule-providers 字段完整（type/behavior/url/path）', !!rpMap && rpMap['rs0_LocalAreaNetwork']?.type === 'http' && rpMap['rs0_LocalAreaNetwork']?.behavior === 'classical' && String(rpMap['rs0_LocalAreaNetwork']?.url).endsWith('LocalAreaNetwork.list') && rpMap['rs0_LocalAreaNetwork']?.path === './ruleset/rs0_LocalAreaNetwork.txt');
 check('RULE-SET 引用名与 rule-providers key 一一对应', !!rpMap && rpYaml.includes('RULE-SET,rs0_LocalAreaNetwork,🎯 全球直连') && rpYaml.includes('RULE-SET,rs1_GoogleFCM,♻️ 自动选择'));
 check('rule-providers 段无残留列表写法', !/^  - tag:/m.test(rpYaml));
+
+// ===== [12] AnyTLS 协议：解析 / 各目标输出 / 往返 / 输入反向 =====
+console.log('\n[12] AnyTLS 协议');
+const ANYTLS_LINK = 'anytls://1613a493eaa144a2@e73c95a5.test.sbs:3708?security=tls&sni=cache-proxy.example.com&fp=chrome&alpn=h2&insecure=1&allowInsecure=1&type=tcp#AnyTLS-Test';
+const an = parseSubscription(ANYTLS_LINK);
+check('anytls 链接解析出 1 个节点', an.length === 1, `实际 ${an.length}`);
+check('anytls 字段完整（密码/SNI/指纹/ALPN/端口）',
+  an[0]?.protocol === 'anytls' && an[0]?.password === '1613a493eaa144a2'
+  && an[0]?.sni === 'cache-proxy.example.com' && an[0]?.fp === 'chrome'
+  && an[0]?.alpn === 'h2' && an[0]?.port === 3708);
+check('insecure=1 / allowInsecure=1 → skipCertVerify', an[0]?.skipCertVerify === true);
+
+const anClash = toClash(an, 'AnyTLS测试');
+const anDoc = parse(anClash) as any;
+const anProxy = anDoc?.proxies?.[0];
+check('Clash 输出 type: anytls', anProxy?.type === 'anytls');
+check('Clash 输出 password/sni/alpn/client-fingerprint/skip-cert-verify',
+  anProxy?.password === '1613a493eaa144a2' && anProxy?.sni === 'cache-proxy.example.com'
+  && JSON.stringify(anProxy?.alpn) === '["h2"]'
+  && anProxy?.['client-fingerprint'] === 'chrome'
+  && anProxy?.['skip-cert-verify'] === true);
+check('Clash 输出 anytls 会话池字段', anProxy?.['idle-session-timeout'] === 30 && anProxy?.udp === true);
+
+const anSb = JSON.parse(toSingbox(an, 'AnyTLS测试'));
+const anOut = (anSb.outbounds ?? []).find((o: any) => o.type === 'anytls');
+check('sing-box 输出 anytls outbound（含 tls/utls/insecure）',
+  !!anOut && anOut.password === '1613a493eaa144a2' && anOut.tls?.enabled === true
+  && anOut.tls?.insecure === true && anOut.tls?.utls?.fingerprint === 'chrome'
+  && JSON.stringify(anOut.tls?.alpn) === '["h2"]');
+check('toLink 往返仍可解析为 anytls', parseSubscription(toLink(an[0]))[0]?.protocol === 'anytls');
+check('mixed / v2ray 输出保留 anytls:// 链接',
+  toMixed(an).startsWith('anytls://')
+  && Buffer.from(toV2ray(an), 'base64').toString('utf8').startsWith('anytls://'));
+
+const AN_YAML = [
+  'proxies:',
+  '  - name: YAML-AnyTLS',
+  '    type: anytls',
+  '    server: yaml.example.com',
+  '    port: 443',
+  '    password: pw123',
+  '    sni: sni.example.com',
+  '    alpn: [h2]',
+  '    client-fingerprint: chrome',
+  '    skip-cert-verify: true',
+].join('\n');
+const anYaml = parseSubscription(AN_YAML);
+check('Clash YAML 输入反向解析 anytls', anYaml.length === 1 && anYaml[0].protocol === 'anytls'
+  && anYaml[0].password === 'pw123' && anYaml[0].skipCertVerify === true);
+
+const AN_SB_JSON = JSON.stringify({ outbounds: [
+  { type: 'anytls', tag: 'sb-anytls', server: 'sb.example.com', server_port: 443, password: 'pw456',
+    tls: { enabled: true, server_name: 'sni.example.com', insecure: true, alpn: ['h2'],
+           utls: { enabled: true, fingerprint: 'chrome' } } },
+] });
+const anJson = parseSubscription(AN_SB_JSON);
+check('sing-box JSON 输入解析 anytls', anJson.length === 1 && anJson[0].protocol === 'anytls'
+  && anJson[0].password === 'pw456' && anJson[0].skipCertVerify === true
+  && anJson[0].sni === 'sni.example.com');
+
+check('Surge 目标正确报告 anytls 不支持', (() => {
+  const u = getUnsupported('surge', an);
+  return u.length === 1 && u[0].protocol === 'anytls' && u[0].count === 1;
+})());
+check('Clash 目标不报告 anytls 不支持', getUnsupported('clash', an).length === 0);
+check('anytls 与普通节点混排可一起解析',
+  parseSubscription(RAW + '\n' + ANYTLS_LINK).length === 6);
+
+// ===== [13] Hysteria2 / TUIC 协议 =====
+console.log('\n[13] Hysteria2 / TUIC');
+const HY2_LINK = 'hysteria2://pass123@hy2.example.com:443?sni=hy2.example.com&alpn=h3&insecure=1&obfs=salamander&obfs-password=obfspw&pinSHA256=abcd1234&mport=1000-2000&up=30%20Mbps&down=200%20Mbps#HY2-Node';
+const HY2_ALIAS = 'hy2://pass999@alias.example.com:8443?insecure=0#HY2-Alias';
+const TUIC5_LINK = 'tuic://00000000-0000-0000-0000-000000000001:pw456@tuic.example.com:10443?sni=tuic.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1&reduce_rtt=1#TUIC5-Node';
+const TUIC4_LINK = 'tuic://TOKEN123@v4.example.com:443?version=4&congestion_control=cubic#TUIC4-Node';
+const qn = parseSubscription([HY2_LINK, HY2_ALIAS, TUIC5_LINK, TUIC4_LINK].join('\n'));
+check('hy2/tuic 共 4 个节点（含 hy2 别名与 tuic v4）', qn.length === 4, `实际 ${qn.length}`);
+const hy2 = qn.find(n => n.server === 'hy2.example.com');
+check('hysteria2 字段（密码/sni/alpn/obfs/混淆密码/指纹/端口跳跃/速率）',
+  hy2?.protocol === 'hysteria2' && hy2?.password === 'pass123' && hy2?.sni === 'hy2.example.com'
+  && hy2?.alpn === 'h3' && hy2?.obfs === 'salamander' && hy2?.obfsPassword === 'obfspw'
+  && hy2?.fingerprint === 'abcd1234' && hy2?.ports === '1000-2000'
+  && hy2?.up === '30 Mbps' && hy2?.down === '200 Mbps' && hy2?.skipCertVerify === true);
+check('hy2:// 别名可解析', qn.some(n => n.server === 'alias.example.com' && n.protocol === 'hysteria2'));
+const tuic5 = qn.find(n => n.server === 'tuic.example.com');
+check('TUIC v5 拆分 uuid:password 并保留拥塞控制/UDP 模式',
+  tuic5?.protocol === 'tuic' && tuic5?.uuid === '00000000-0000-0000-0000-000000000001'
+  && tuic5?.password === 'pw456' && !tuic5?.token
+  && tuic5?.congestionController === 'bbr' && tuic5?.udpRelayMode === 'native'
+  && tuic5?.reduceRtt === true && tuic5?.skipCertVerify === true);
+check('TUIC v4 使用 token 且不写 uuid', qn.some(n => n.protocol === 'tuic' && n.token === 'TOKEN123' && !n.uuid && n.congestionController === 'cubic'));
+
+const qClash = parse(toClash(qn, 'QUIC测试')) as any;
+const qProxies = qClash?.proxies ?? [];
+const hy2p = qProxies.find((p: any) => p.type === 'hysteria2');
+const tuicp = qProxies.find((p: any) => p.type === 'tuic');
+check('Clash 输出 type: hysteria2（含 obfs/ports/up/down/fingerprint）',
+  !!hy2p && hy2p.obfs === 'salamander' && hy2p['obfs-password'] === 'obfspw'
+  && hy2p.ports === '1000-2000' && hy2p.up === '30 Mbps' && hy2p.fingerprint === 'abcd1234'
+  && JSON.stringify(hy2p.alpn) === '["h3"]');
+check('Clash 输出 type: tuic（含 uuid/password/congestion-controller/reduce-rtt）',
+  !!tuicp && tuicp.uuid === '00000000-0000-0000-0000-000000000001'
+  && tuicp.password === 'pw456' && tuicp['congestion-controller'] === 'bbr'
+  && tuicp['udp-relay-mode'] === 'native' && tuicp['reduce-rtt'] === true);
+
+const qSb = JSON.parse(toSingbox(qn, 'QUIC测试'));
+const hy2Out = qSb.outbounds.find((o: any) => o.type === 'hysteria2');
+const tuicOut = qSb.outbounds.find((o: any) => o.type === 'tuic');
+check('sing-box 输出 hysteria2（obfs/up_mbps/down_mbps/tls）',
+  !!hy2Out && hy2Out.password === 'pass123' && hy2Out.obfs?.type === 'salamander'
+  && hy2Out.up_mbps === 30 && hy2Out.down_mbps === 200 && hy2Out.tls?.insecure === true);
+check('sing-box 输出 tuic（congestion_control/zero_rtt_handshake/tls）',
+  !!tuicOut && tuicOut.uuid === '00000000-0000-0000-0000-000000000001'
+  && tuicOut.congestion_control === 'bbr' && tuicOut.zero_rtt_handshake === true
+  && tuicOut.tls?.insecure === true);
+check('hy2 / tuic 链接往返后仍可解析', qn.every(n => parseSubscription(toLink(n))[0]?.protocol === n.protocol));
+check('mixed / v2ray 保留 hysteria2:// 与 tuic:// 链接',
+  toMixed(qn).includes('hysteria2://') && toMixed(qn).includes('tuic://')
+  && Buffer.from(toV2ray(qn), 'base64').toString('utf8').includes('hysteria2://'));
+check('+ 号按空格解码（up/down 往返不损坏）', parseSubscription(toLink(hy2!))[0]?.up === '30 Mbps');
+
+const QUIC_YAML = [
+  'proxies:',
+  '  - name: YAML-HY2',
+  '    type: hysteria2',
+  '    server: y-hy2.example.com',
+  '    port: 443',
+  '    password: p1',
+  '    obfs: salamander',
+  '    obfs-password: o1',
+  '    alpn: [h3]',
+  '  - name: YAML-TUIC',
+  '    type: tuic',
+  '    server: y-tuic.example.com',
+  '    port: 443',
+  '    uuid: uuid-y',
+  '    password: p2',
+  '    congestion-controller: cubic',
+  '    udp-relay-mode: quic',
+  '    disable-sni: true',
+].join('\n');
+const qYaml = parseSubscription(QUIC_YAML);
+check('Clash YAML 输入反向解析 hysteria2 + tuic', qYaml.length === 2
+  && qYaml.some(n => n.protocol === 'hysteria2' && n.obfsPassword === 'o1')
+  && qYaml.some(n => n.protocol === 'tuic' && n.congestionController === 'cubic' && n.disableSni === true));
+
+const QUIC_JSON = JSON.stringify({ outbounds: [
+  { type: 'hysteria2', tag: 'sb-hy2', server: 'j-hy2.example.com', server_port: 443, password: 'p3',
+    up_mbps: 50, down_mbps: 300, obfs: { type: 'salamander', password: 'o3' }, tls: { enabled: true, insecure: true, server_name: 'j.example.com' } },
+  { type: 'tuic', tag: 'sb-tuic', server: 'j-tuic.example.com', server_port: 443, uuid: 'uuid-j', password: 'p4',
+    congestion_control: 'bbr', udp_relay_mode: 'native', zero_rtt_handshake: true, tls: { enabled: true, server_name: 'j.example.com' } },
+] });
+const qJson = parseSubscription(QUIC_JSON);
+check('sing-box JSON 输入反向解析 hysteria2 + tuic', qJson.length === 2
+  && qJson.some(n => n.protocol === 'hysteria2' && n.up === '50 Mbps' && n.obfsPassword === 'o3')
+  && qJson.some(n => n.protocol === 'tuic' && n.reduceRtt === true && n.uuid === 'uuid-j'));
+
+const qUnsup = getUnsupported('surge', qn);
+check('Surge 报告 hysteria2 / tuic 不支持', qUnsup.some(u => u.protocol === 'hysteria2') && qUnsup.some(u => u.protocol === 'tuic'));
+check('Clash 目标不报告 QUIC 协议不支持', getUnsupported('clash', qn).length === 0);
+check('7 种协议混排一次解析 = 9 节点', parseSubscription(RAW + '\n' + ANYTLS_LINK + '\n' + HY2_LINK + '\n' + TUIC5_LINK + '\n' + TUIC4_LINK).length === 9);
 
 console.log(`\n========== 结果: ${pass} 通过, ${fail} 失败 ==========`);
 process.exit(fail ? 1 : 0);
