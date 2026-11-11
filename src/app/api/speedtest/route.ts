@@ -15,8 +15,19 @@ interface SpeedResult {
   err?: string;
 }
 
+/** TLS/QUIC 私有协议：非标端口且服务端不响应明文 HTTP，Workers 的 fetch 无法探测。
+ *  单独标注，避免把"不支持 HTTP 探测"误报成"节点超时"。 */
+const NON_HTTP_PROBE_PROTOCOLS = new Set(['anytls', 'hysteria2', 'tuic']);
+
 /** 测单个节点 TCP 建连延迟（无 TCP 握手层面的鉴权，仅测可达性+建连耗时） */
 async function testNode(n: NodeInfo, timeoutMs = 5000): Promise<SpeedResult> {
+  if (NON_HTTP_PROBE_PROTOCOLS.has(n.protocol)) {
+    return {
+      name: n.name, server: n.server, port: n.port, protocol: n.protocol,
+      ok: false, delay: null,
+      err: 'TLS/QUIC 私有协议（非标端口），请在客户端内测速',
+    };
+  }
   const start = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);

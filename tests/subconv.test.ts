@@ -544,5 +544,15 @@ check('Surge 报告 hysteria2 / tuic 不支持', qUnsup.some(u => u.protocol ===
 check('Clash 目标不报告 QUIC 协议不支持', getUnsupported('clash', qn).length === 0);
 check('7 种协议混排一次解析 = 9 节点', parseSubscription(RAW + '\n' + ANYTLS_LINK + '\n' + HY2_LINK + '\n' + TUIC5_LINK + '\n' + TUIC4_LINK).length === 9);
 
+// ===== [14] 生成的 Clash DNS 模板不得导致移动端 DNS 失效 =====
+console.log('\n[14] Clash DNS 模板');
+const dnsYaml = toClash(parseSubscription(ANYTLS_LINK), 'DNS模板校验');
+const dnsDoc = parse(dnsYaml) as any;
+check('dns.enable 与 fake-ip 保留', dnsDoc.dns?.enable === true && dnsDoc.dns?.['enhanced-mode'] === 'fake-ip');
+check('不预置 dns.listen（移动端无权限绑定 53 会导致全部节点超时）', !dnsDoc.dns?.listen);
+check('不预置 dns.fallback（境外 DoH 不可达会拖垮解析）', !dnsDoc.dns?.fallback);
+check('不预置 ipv6: true（顶层与 dns 段都不设）', dnsDoc.ipv6 !== true && dnsDoc.dns?.ipv6 !== true);
+check('nameserver 使用国内可达 DoH', (dnsDoc.dns?.nameserver ?? []).some((x: string) => x.includes('doh.pub') || x.includes('dns.alidns.com')));
+
 console.log(`\n========== 结果: ${pass} 通过, ${fail} 失败 ==========`);
 process.exit(fail ? 1 : 0);

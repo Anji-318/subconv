@@ -867,15 +867,12 @@ mixed-port: 7890
 allow-lan: false
 mode: rule
 log-level: info
-ipv6: true
 unified-delay: true
 external-controller: 127.0.0.1:9090
 global-ua: clash.meta
 
 dns:
   enable: true
-  ipv6: true
-  listen: 0.0.0.0:53
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
@@ -887,11 +884,11 @@ dns:
     - 223.5.5.5
     - 119.29.29.29
   nameserver:
-    - https://dns.alidns.com/dns-query
     - https://doh.pub/dns-query
-  fallback:
-    - https://1.1.1.1/dns-query
-    - https://8.8.8.8/dns-query
+    - https://dns.alidns.com/dns-query
+  # 不预置 DNS 监听端口（移动端无权限绑定 53 会让 DNS 失效、节点全部超时）
+  # 不预置 ipv6 / fallback 到境外 DoH（1.1.1.1 / 8.8.8.8 不可达会拖垮解析）
+  # 如需自定义 DNS，请用 configRaw 覆盖本段或在客户端里调整
 
 proxies:
 ${proxyList}
